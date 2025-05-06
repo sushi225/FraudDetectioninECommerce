@@ -39,10 +39,10 @@ def check_multiple_low_ratings(conn, product_id):
         cursor = conn.cursor()
         time_threshold = datetime.datetime.now() - timedelta(hours=24)
         query = """
-        SELECT COUNT(*) FROM Reviews
+        SELECT COUNT(*) FROM Review -- Corrected table name
         WHERE product_id = %s
         AND rating <= 2
-        AND review_date >= %s
+        AND created_at >= %s -- Corrected column name
         """
         cursor.execute(query, (product_id, time_threshold))
         count = cursor.fetchone()[0]
@@ -64,7 +64,7 @@ def check_repeat_reviews(conn, buyer_id, product_id):
     try:
         cursor = conn.cursor()
         query = """
-        SELECT COUNT(*) FROM Reviews
+        SELECT COUNT(*) FROM Review -- Corrected table name
         WHERE buyer_id = %s
         AND product_id = %s
         """
@@ -88,12 +88,12 @@ def check_rapid_orders(conn, buyer_id, seller_id):
         time_threshold = datetime.datetime.now() - timedelta(hours=1)
         # Need to join Orders with Products to get seller_id
         query = """
-        SELECT COUNT(o.order_id)
-        FROM Orders o
-        JOIN Products p ON o.product_id = p.product_id
-        WHERE o.buyer_id = %s
+        SELECT COUNT(o.id) -- Assuming o.id is the primary key for Order
+        FROM `Order` o -- Corrected table name
+        JOIN Product p ON o.product_id = p.id -- Assuming p.id is the primary key for Product
+        WHERE o.user_id = %s -- Assuming o.user_id is the buyer
         AND p.seller_id = %s
-        AND o.order_date >= %s
+        AND o.created_at >= %s -- Corrected column name
         """
         cursor.execute(query, (buyer_id, seller_id, time_threshold))
         count = cursor.fetchone()[0]
@@ -115,11 +115,11 @@ def check_rapid_transactions(conn, buyer_id, product_id, amount_cents):
         time_threshold = datetime.datetime.now() - timedelta(minutes=10)
         # Assuming Transactions table has buyer_id, product_id, amount_cents, and timestamp
         query = """
-        SELECT COUNT(*) FROM Transactions
+        SELECT COUNT(*) FROM Transaction -- Corrected table name
         WHERE buyer_id = %s
         AND product_id = %s
         AND amount_cents = %s
-        AND transaction_date >= %s
+        AND timestamp >= %s -- Corrected column name
         """
         cursor.execute(query, (buyer_id, product_id, amount_cents, time_threshold))
         count = cursor.fetchone()[0]
@@ -141,10 +141,10 @@ def check_multiple_not_delivered(conn, buyer_id):
         time_threshold = datetime.datetime.now() - timedelta(hours=24)
         # Assuming SupportTickets table has buyer_id, issue_type, and created_at timestamp
         query = """
-        SELECT COUNT(*) FROM SupportTickets
+        SELECT COUNT(*) FROM CustomerSupport -- Corrected table name
         WHERE buyer_id = %s
-        AND status = 'Open' -- Or a specific 'issue_type' like 'Item Not Delivered'
-        AND issue LIKE '%not delivered%' -- Example, adjust based on actual schema/data
+        AND status = 'open' -- Corrected status value
+        AND description LIKE '%not delivered%' -- Assuming 'description' field for issue text
         AND created_at >= %s
         """
         cursor.execute(query, (buyer_id, time_threshold))
@@ -165,7 +165,7 @@ def check_self_purchase(conn, buyer_id, product_id):
     try:
         cursor = conn.cursor()
         # Get the seller_id for the product
-        query = "SELECT seller_id FROM Products WHERE product_id = %s"
+        query = "SELECT seller_id FROM Product WHERE id = %s" # Corrected table and column name
         cursor.execute(query, (product_id,))
         result = cursor.fetchone()
         if result:
@@ -274,7 +274,7 @@ def run_fraud_checks(conn, event_type, data):
         if not seller_id and product_id:
              cursor = conn.cursor()
              try:
-                 cursor.execute("SELECT seller_id FROM Products WHERE product_id = %s", (product_id,))
+                 cursor.execute("SELECT seller_id FROM Product WHERE id = %s", (product_id,)) # Corrected table and column name
                  result = cursor.fetchone()
                  if result: seller_id = result[0]
              except mysql.connector.Error as err:

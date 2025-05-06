@@ -911,10 +911,10 @@ else:
 
                         # 4b. Create Transaction record
                         trans_sql = """
-                            INSERT INTO Transaction (order_id, buyer_id, seller_id, product_id, amount_cents, timestamp)
-                            VALUES (%s, %s, %s, %s, %s, %s)
+                            INSERT INTO Transaction (buyer_id, seller_id, product_id, amount_cents, timestamp)
+                            VALUES (%s, %s, %s, %s, %s)
                         """
-                        trans_values = (order_id, st.session_state.user_id, seller_id, product_id, item_total_cents, datetime.now())
+                        trans_values = (st.session_state.user_id, seller_id, product_id, item_total_cents, datetime.now())
                         cursor.execute(trans_sql, trans_values)
                         transaction_id = cursor.lastrowid
                         if not transaction_id: raise Exception(f"Failed to create transaction record for product ID {product_id}.")
@@ -967,6 +967,7 @@ else:
 
                     st.success(f"Order placed successfully! Order ID: {order_id}")
                     st.balloons()
+                    st.cache_data.clear() # Clear cache to ensure order list updates
                     st.rerun() # Rerun to clear cart display and update orders
 
                 except Exception as e:
@@ -975,7 +976,7 @@ else:
                     # Log failed checkout attempt (before cursor close, after rollback)
                     log_activity(checkout_conn, st.session_state.user_id, 'checkout_failed', f'Error: {str(e)}')
                 finally:
-                    if cursor and not cursor.closed:
+                    if cursor: # Removed 'not cursor.closed' check
                         cursor.close()
                     checkout_conn.autocommit = original_autocommit_state # Restore autocommit
 
@@ -1000,6 +1001,17 @@ else:
 
         # --- Main Buyer UI ---
         st.title("Buyer Dashboard")
+
+        # Display Wallet Balance
+        buyer_conn_wallet = get_db_connection()
+        if buyer_conn_wallet:
+            current_balance_cents = get_wallet_balance(buyer_conn_wallet, st.session_state.user_id)
+            st.metric("My Wallet Balance", f"₹{current_balance_cents / 100:.2f}")
+            if buyer_conn_wallet.is_connected():
+                buyer_conn_wallet.close()
+        else:
+            st.warning("Could not fetch wallet balance.")
+
 
         tab1, tab2, tab3, tab4, tab5 = st.tabs([
             "Browse Products", "View Cart", "My Orders", "Submit Review", "Customer Support"
