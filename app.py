@@ -800,16 +800,16 @@ else:
                     # Find transactions for the user's orders where a review doesn't exist
                     # Assumes Payment status 'completed' means order is reviewable
                     query = """
-                        SELECT t.id as transaction_id, t.product_id, p.name as product_name, o.id as order_id, o.order_date
+                        SELECT t.id as transaction_id, t.product_id, p.name as product_name # Removed o.id, o.created_at
                         FROM Transaction t
                         JOIN Product p ON t.product_id = p.id
-                        JOIN `Order` o ON t.order_id = o.id
-                        JOIN Payment pay ON o.payment_id = pay.id
-                        LEFT JOIN Review r ON t.product_id = r.product_id AND o.id = r.order_id AND t.buyer_id = r.buyer_id
+                        # JOIN `Order` o ON t.order_id = o.id # REMOVED INVALID JOIN
+                        # JOIN Payment pay ON o.payment_id = pay.id # REMOVED INVALID JOIN
+                        LEFT JOIN Review r ON t.product_id = r.product_id AND t.buyer_id = r.buyer_id # Simplified join condition, removed o.id
                         WHERE t.buyer_id = %s
-                          AND pay.status = 'completed'
-                          AND r.id IS NULL
-                        ORDER BY o.order_date DESC, p.name ASC
+                          # AND pay.status = 'completed' # Removed condition
+                          AND r.id IS NULL # Keep check for existing review based on product/buyer
+                        ORDER BY t.timestamp DESC, p.name ASC # Order by transaction time instead
                     """
                     cursor.execute(query, (user_id,))
                     items = cursor.fetchall()
@@ -1137,7 +1137,7 @@ else:
                     # Format currency and dates for display
                     df_orders['total_amount_cents'] = df_orders['total_amount_cents'].apply(lambda x: f"₹{x / 100:.2f}")
                     df_orders['order_date'] = pd.to_datetime(df_orders['order_date']).dt.strftime('%Y-%m-%d %H:%M:%S')
-                    df_orders['payment_date'] = pd.to_datetime(df_orders['payment_date']).dt.strftime('%Y-%m-%d %H:%M:%S')
+                    df_orders['payment_timestamp'] = pd.to_datetime(df_orders['payment_timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
                     st.dataframe(df_orders)
                 else:
                     st.info("You have not placed any orders yet.")
