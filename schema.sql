@@ -15,6 +15,7 @@ CREATE TABLE Product (
     id BIGINT NOT NULL AUTO_INCREMENT,
     seller_id BIGINT NOT NULL,
     name VARCHAR(255) NOT NULL,
+    description TEXT NULL, -- Added product description
     price_cents BIGINT NOT NULL,
     quantity INT NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

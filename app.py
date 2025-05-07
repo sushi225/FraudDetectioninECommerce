@@ -850,11 +850,11 @@ else:
 
                             cursor = add_prod_conn.cursor()
                             insert_sql = """
-                                INSERT INTO Product (seller_id, name, price_cents, quantity, created_at)
-                                VALUES (%s, %s, %s, %s, %s)
+                                INSERT INTO Product (seller_id, name, description, price_cents, quantity, created_at)
+                                VALUES (%s, %s, %s, %s, %s, %s)
                             """
                             # New products might need admin approval depending on rules
-                            values = (st.session_state.user_id, product_name, price_cents, product_quantity, datetime.now())
+                            values = (st.session_state.user_id, product_name, product_desc, price_cents, product_quantity, datetime.now())
                             cursor.execute(insert_sql, values)
                             product_id = cursor.lastrowid
                             add_prod_conn.commit()
@@ -979,7 +979,7 @@ else:
                 with _conn.cursor(dictionary=True) as cursor:
                     # Join with User table to get seller email
                     query = """
-                        SELECT p.id, p.name, p.price_cents, p.quantity, p.seller_id, u.email as seller_email
+                        SELECT p.id, p.name, p.description, p.price_cents, p.quantity, p.seller_id, u.email as seller_email
                         FROM Product p
                         JOIN User u ON p.seller_id = u.id
                         WHERE p.quantity > 0
