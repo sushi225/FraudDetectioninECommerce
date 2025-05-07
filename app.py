@@ -240,10 +240,9 @@ else:
                 )
                 # Check if the update actually changed rows, handle if user doesn't exist?
                 if cursor.rowcount == 0:
-                     st.warning(f"Wallet for User ID {user_id} not found or balance unchanged.")
-                     # Optionally create wallet here if needed:
-                     # cursor.execute("INSERT INTO Wallet (user_id, balance_cents) VALUES (%s, %s)", (user_id, amount_change_cents))
-                     # return False # Indicate wallet didn't exist initially?
+                     # Wallet not found, so create it with the initial adjustment amount
+                     cursor.execute("INSERT INTO Wallet (user_id, balance_cents) VALUES (%s, %s)", (user_id, amount_change_cents))
+                     # st.info(f"New wallet created for User ID {user_id} with balance: {amount_change_cents / 100:.2f}") # Optional info message
                 # No commit here, assuming it's part of a larger transaction handled by the caller
                 return True
             except mysql.connector.Error as err:
@@ -628,6 +627,10 @@ else:
                                     if success:
                                         log_activity(wallet_conn, st.session_state.user_id, 'adjust_wallet',
                                                      f'Target User ID: {selected_user_id_wallet}, Amount Cents: {adjustment_amount_cents}, Reason: {adjustment_reason}')
+                                        wallet_conn.commit() # Commit wallet update and log
+                                        st.success(f"Wallet for User ID {selected_user_id_wallet} adjusted by ₹{adjustment_amount_inr:.2f}.")
+                                        st.cache_data.clear() # Clear cache to reflect changes
+                                        st.rerun() # Rerun to update UI
                                         wallet_conn.commit() # Commit update and log
                                         st.success(f"Wallet balance for User ID {selected_user_id_wallet} adjusted successfully.")
                                         st.cache_data.clear() # Clear balance cache
@@ -930,6 +933,34 @@ else:
             if conn and conn.is_connected():
                 conn.close()
             st.stop()
+        def get_user_email(conn_db, user_id_to_fetch):
+            """Fetches a user's email by their ID."""
+            cursor_email = None
+            try:
+                cursor_email = conn_db.cursor(dictionary=True)
+                cursor_email.execute("SELECT email FROM User WHERE id = %s", (user_id_to_fetch,))
+                user_data_email = cursor_email.fetchone()
+                if user_data_email:
+                    return user_data_email['email']
+            except mysql.connector.Error as err_email:
+                st.error(f"Error fetching user email: {err_email}")
+            finally:
+                if cursor_email:
+                    cursor_email.close()
+            return None
+
+        buyer_email_str = get_user_email(conn, st.session_state.user_id)
+        buyer_dashboard_title = "Buyer Dashboard" # Default title
+        if buyer_email_str and buyer_email_str.startswith('buyer') and '@example.com' in buyer_email_str:
+            try:
+                # Extracts 'N' from 'buyerN@example.com'
+                buyer_number_str = buyer_email_str.replace('buyer', '').split('@')[0]
+                if buyer_number_str.isdigit():
+                    buyer_dashboard_title = f"Buyer {buyer_number_str} Dashboard"
+            except Exception:
+                pass # Stick to default title if parsing fails
+        
+        st.title(buyer_dashboard_title)
         # Close connection if only used for blacklist check initially
         # However, we'll likely need it again, so keep it open for now,
         # but ensure it's closed properly in all execution paths.
