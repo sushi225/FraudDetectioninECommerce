@@ -45,7 +45,107 @@ def login_user(email, password):
     return user, role
 
 # Basic Page Configuration
-st.set_page_config(page_title="E-Commerce Fraud Detection", layout="wide")
+st.set_page_config(page_title="E-com Detectify", layout="wide")
+# Custom CSS for theming
+custom_theme_css = f"""
+&lt;style&gt;
+    :root {{
+        --primary-color: red !important;
+        --background-color: white !important;
+        --secondary-background-color: white !important; /* For elements like cards, sidebars */
+        --text-color: black !important;
+        --font: "SF Pro Bold", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+    }}
+
+    body, .stApp, .main {{ /* Apply to body and main Streamlit app container */
+        font-family: "SF Pro Bold", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+        color: black !important;
+        background-color: white !important; /* Ensure main background is white */
+    }}
+
+    /* Ensure all text elements inherit the font and color */
+    h1, h2, h3, h4, h5, h6, p, div, span, label, li, a, th, td,
+    .stTextInput label, .stTextArea label, .stSelectbox label, .stDateInput label, .stNumberInput label, .stRadio label, .stCheckbox label,
+    .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] &gt; div,
+    .stDateInput input, .stNumberInput input,
+    .stMetric, .stMetric label, .stMetric div[data-testid="stMetricValue"],
+    .stDataFrame {{
+        font-family: "SF Pro Bold", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+        color: black !important;
+    }}
+
+    /* Buttons */
+    .stButton &gt; button {{
+        background-color: red !important;
+        color: white !important; /* Text on red buttons */
+        border: 1px solid red !important;
+        font-family: "SF Pro Bold", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+    }}
+    .stButton &gt; button:hover {{
+        background-color: darkred !important;
+        border-color: darkred !important;
+        color: white !important;
+    }}
+    .stButton &gt; button:active {{
+        background-color: #b20000 !important; /* Even darker red for active state */
+        border-color: #b20000 !important;
+        color: white !important;
+    }}
+    .stButton &gt; button:focus {{
+        box-shadow: 0 0 0 0.2rem rgba(255, 0, 0, 0.5) !important;
+    }}
+
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {{
+        background-color: white !important;
+    }}
+    .stTabs [data-baseweb="tab"] {{
+        font-family: "SF Pro Bold", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+        color: #555 !important; /* Default tab text color */
+        background-color: #f0f2f6 !important; /* Default tab background */
+    }}
+    .stTabs [data-baseweb="tab"]:hover {{
+        color: black !important;
+        background-color: #e6e6e6 !important;
+    }}
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {{
+        font-family: "SF Pro Bold", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+        color: white !important; /* Text of active tab on red background */
+        background-color: red !important; /* Active tab background */
+        border-bottom-color: red !important; 
+        box-shadow: none !important;
+    }}
+    .stTabs [data-baseweb="tab"][aria-selected="true"] &gt; div {{
+         color: white !important; /* Ensure text within the active tab div is white */
+    }}
+
+    /* Markdown specific styling */
+    .stMarkdown, .stMarkdown p, .stMarkdown li, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4, .stMarkdown h5, .stMarkdown h6, .stMarkdown strong, .stMarkdown em, .stMarkdown code, .stMarkdown pre {{
+        font-family: "SF Pro Bold", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+        color: black !important;
+    }}
+
+    /* Input fields styling */
+    .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] &gt; div, .stDateInput input, .stNumberInput input {{
+        border-color: #ccc !important; /* A neutral border for inputs */
+    }}
+    .stTextInput input:focus, .stTextArea textarea:focus, .stSelectbox div[data-baseweb="select"]:focus-within, .stDateInput input:focus, .stNumberInput input:focus {{
+        border-color: red !important; /* Primary color border on focus */
+        box-shadow: 0 0 0 0.2rem rgba(255, 0, 0, 0.25) !important;
+    }}
+
+    /* Sidebar styling if it exists and needs to be white */
+    [data-testid="stSidebar"] {{
+        background-color: white !important;
+    }}
+    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] p, [data-testid="stSidebar"] div, [data-testid="stSidebar"] span, [data-testid="stSidebar"] label, [data-testid="stSidebar"] li, [data-testid="stSidebar"] a {{
+        font-family: "SF Pro Bold", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+        color: black !important;
+    }}
+
+&lt;/style&gt;
+"""
+# st.markdown(custom_theme_css, unsafe_allow_html=True)
 
 # Initialize session state variables if they don't exist
 if 'logged_in' not in st.session_state:
@@ -56,10 +156,14 @@ if 'role' not in st.session_state:
     st.session_state.role = None
 
 # --- Sidebar Placeholder ---
-with st.sidebar:
-    if st.session_state.logged_in:
-        st.write(f"Logged in as: {st.session_state.role} (ID: {st.session_state.user_id})")
-        if st.button("Logout"):
+
+# --- Main Page Content ---
+if st.session_state.logged_in:
+    # Create columns for alignment, logout button on the top-right
+    # Using a large ratio for the first column to push the button to the far right
+    _, logout_button_col = st.columns([10, 1]) # Adjust ratio for desired spacing
+    with logout_button_col:
+        if st.button("Logout", key="main_logout_button_top_right"): # Added a unique key
             conn = get_db_connection()
             if conn and st.session_state.user_id:
                 log_activity(conn, st.session_state.user_id, 'logout')
@@ -70,34 +174,34 @@ with st.sidebar:
             st.session_state.user_id = None
             st.session_state.role = None
             st.rerun() # Rerun to reflect logout state
-    else:
-        st.write("Login/Signup Placeholder")
-        # Login/Signup form will go here later
 
-# --- Main Page Content ---
-st.title("E-Commerce Platform")
+st.markdown("<h1 style='text-align: center;'>E-com Detectify</h1>", unsafe_allow_html=True)
 
 if not st.session_state.logged_in:
-    st.subheader("Login")
-    with st.form("login_form"):
-        email = st.text_input("Email")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Login")
-        
-        if submitted:
-            user_id, role = login_user(email, password)
-            if user_id:
-                st.session_state.logged_in = True
-                st.session_state.user_id = user_id
-                st.session_state.role = role
-                conn = get_db_connection()
-                if conn:
-                    log_activity(conn, user_id, 'login') # Log successful login
-                    if conn.is_connected():
-                         conn.close()
-                st.rerun()
-            else:
-                st.error("Invalid email or password")
+    st.markdown("<h2 style='text-align: center;'>Login</h2>", unsafe_allow_html=True)
+    
+    # Center the login form
+    login_col_left, login_col_center, login_col_right = st.columns([1, 1.5, 1]) # Adjust ratios as needed for desired width
+    with login_col_center:
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login")
+            
+            if submitted:
+                user_id, role = login_user(email, password)
+                if user_id:
+                    st.session_state.logged_in = True
+                    st.session_state.user_id = user_id
+                    st.session_state.role = role
+                    conn = get_db_connection()
+                    if conn:
+                        log_activity(conn, user_id, 'login') # Log successful login
+                        if conn.is_connected():
+                             conn.close()
+                    st.rerun()
+                else:
+                    st.error("Invalid email or password")
 else:
     # --- Role-Based Dashboards ---
     if st.session_state.role == 'admin':
@@ -277,8 +381,8 @@ else:
         st.title("Admin Dashboard")
 
         # 2. Tabs
-        tab_overview, tab_users, tab_wallet, tab_activity, tab_anomaly, tab_all_reviews, tab_all_tickets = st.tabs([
-            "Overview", "User Management", "Wallet Management", "Activity Log", "Anomaly Log", "All Reviews", "All Customer Tickets"
+        tab_overview, tab_users, tab_create_user, tab_wallet, tab_activity, tab_anomaly, tab_all_reviews, tab_all_tickets = st.tabs([
+            "Overview", "User Management", "Create User", "Wallet Management", "Activity Log", "Anomaly Log", "All Reviews", "All Customer Tickets"
         ])
 
         # Fetch data needed across multiple tabs once
@@ -379,6 +483,98 @@ else:
                 st.info("No users found to manage.")
 
 
+# --- Create User Tab ---
+        with tab_create_user:
+            st.header("Create New User")
+
+            def get_next_user_number(conn_db, role_prefix_str):
+                """Determines the next sequential number for a user based on role."""
+                cursor_next_num = None
+                next_number_val = 1
+                try:
+                    cursor_next_num = conn_db.cursor()
+                    query_next_num = "SELECT email FROM User WHERE email LIKE %s ORDER BY id DESC" # Check existing emails
+                    cursor_next_num.execute(query_next_num, (f"{role_prefix_str}%@example.com",))
+                    
+                    max_num_found = 0
+                    for row_email in cursor_next_num.fetchall():
+                        email_addr_str = row_email[0]
+                        try:
+                            # Extract number: buyer123@example.com -> 123
+                            num_part_str = email_addr_str.replace(role_prefix_str, "").split('@')[0]
+                            if num_part_str.isdigit():
+                                current_num = int(num_part_str)
+                                if current_num > max_num_found:
+                                    max_num_found = current_num
+                        except ValueError:
+                            continue # Skip if parsing fails for any reason
+                    next_number_val = max_num_found + 1
+                except mysql.connector.Error as err_next_num:
+                    st.error(f"Error determining next user number for {role_prefix_str}: {err_next_num}")
+                    # In case of error, this might lead to duplicate numbers if not handled carefully,
+                    # or we could decide to stop creation. For now, it defaults to 1 or max_found + 1.
+                finally:
+                    if cursor_next_num:
+                        cursor_next_num.close()
+                return next_number_val
+
+            with st.form("create_user_form", clear_on_submit=True):
+                st.subheader("New User Details")
+                new_user_role_selection = st.selectbox("Select Role", ["buyer", "seller"], key="new_user_role_select")
+                new_user_password_input = st.text_input("Enter Password", type="password", key="new_user_password_input")
+                
+                create_user_button = st.form_submit_button("Create New User")
+
+                if create_user_button:
+                    if not new_user_password_input:
+                        st.warning("Password is required to create a new user.")
+                    else:
+                        conn_create_user = None
+                        try:
+                            conn_create_user = get_db_connection()
+                            if not conn_create_user:
+                                st.error("Database connection failed. Cannot create user.")
+                                st.stop()
+
+                            # Determine the next email number
+                            next_user_seq_num = get_next_user_number(conn_create_user, new_user_role_selection)
+                            generated_email = f"{new_user_role_selection}{next_user_seq_num}@example.com"
+                            
+                            # Hash the password
+                            password_bytes = new_user_password_input.encode('utf-8')
+                            hashed_password_bytes = bcrypt.hashpw(password_bytes, bcrypt.gensalt())
+                            hashed_password_str = hashed_password_bytes.decode('utf-8') # Store as string
+                            
+                            cursor_insert_user = conn_create_user.cursor()
+                            insert_query = "INSERT INTO User (email, password_hash, role) VALUES (%s, %s, %s)"
+                            insert_values = (generated_email, hashed_password_str, new_user_role_selection)
+                            
+                            cursor_insert_user.execute(insert_query, insert_values)
+                            newly_created_user_id = cursor_insert_user.lastrowid
+                            conn_create_user.commit()
+                            
+                            log_activity(conn_create_user, st.session_state.user_id, 'admin_create_user', 
+                                         f'Created User ID: {newly_created_user_id}, Email: {generated_email}, Role: {new_user_role_selection}')
+                            conn_create_user.commit() # Commit the log
+
+                            st.success(f"User '{generated_email}' ({new_user_role_selection.capitalize()}) created successfully with ID: {newly_created_user_id}!")
+                            
+                            # Clear caches that might hold user lists
+                            st.cache_data.clear() 
+                            cursor_insert_user.close()
+                            st.rerun() # Rerun to refresh lists and clear form
+
+                        except mysql.connector.Error as db_err:
+                            if conn_create_user:
+                                conn_create_user.rollback()
+                            st.error(f"Database error during user creation: {db_err}")
+                            if "Duplicate entry" in str(db_err) and "for key 'User.email'" in str(db_err):
+                                st.warning(f"The email '{generated_email}' might already exist. Please try again or check logs.")
+                        except Exception as e:
+                            st.error(f"An unexpected error occurred: {e}")
+                        finally:
+                            if conn_create_user and conn_create_user.is_connected():
+                                conn_create_user.close()
         # --- Wallet Management Tab ---
         with tab_wallet:
             st.header("Wallet Management")
