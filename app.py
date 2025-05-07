@@ -259,7 +259,7 @@ else:
             cursor = None
             try:
                 cursor = _conn.cursor(dictionary=True)
-                query = "SELECT * FROM AnomalyDetectionLog ORDER BY timestamp DESC LIMIT %s"
+                query = "SELECT id, event_type, reference_id, rule_triggered, timestamp FROM AnomalyDetectionLog ORDER BY timestamp DESC LIMIT %s"
                 cursor.execute(query, (limit,))
                 anomalies = cursor.fetchall()
             except mysql.connector.Error as err:
