@@ -70,3 +70,63 @@ def check_blacklist(conn, user_id):
     finally:
         if cursor:
             cursor.close()
+def get_all_reviews(conn):
+    """Fetches all reviews with product name and buyer email."""
+    if not conn:
+        print("Error: Database connection is not available for fetching all reviews.")
+        return []
+    cursor = None
+    try:
+        cursor = conn.cursor(dictionary=True)
+        query = """
+        SELECT
+            r.id,
+            p.name AS product_name,
+            u.email AS buyer_email,
+            r.rating,
+            r.text,
+            r.created_at AS review_date
+        FROM Review r
+        JOIN Product p ON r.product_id = p.id
+        JOIN User u ON r.buyer_id = u.id
+        ORDER BY review_date DESC;
+        """
+        cursor.execute(query)
+        reviews = cursor.fetchall()
+        return reviews
+    except mysql.connector.Error as err:
+        print(f"Error fetching all reviews: {err}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()
+def get_all_customer_tickets(conn):
+    """Fetches all customer support tickets with buyer email."""
+    if not conn:
+        print("Error: Database connection is not available for fetching all customer tickets.")
+        return []
+    cursor = None
+    try:
+        cursor = conn.cursor(dictionary=True)
+        query = """
+        SELECT
+            cs.id,
+            u.email AS buyer_email,
+            cs.issue_type AS subject,
+            cs.description,
+            cs.status,
+            cs.created_at,
+            cs.order_id
+        FROM CustomerSupport cs
+        JOIN User u ON cs.buyer_id = u.id
+        ORDER BY cs.created_at DESC;
+        """
+        cursor.execute(query)
+        tickets = cursor.fetchall()
+        return tickets
+    except mysql.connector.Error as err:
+        print(f"Error fetching all customer tickets: {err}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()

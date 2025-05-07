@@ -78,7 +78,7 @@ CREATE TABLE Transaction (
 -- Review Table
 CREATE TABLE Review (
     id BIGINT NOT NULL AUTO_INCREMENT,
-    order_id BIGINT NOT NULL,
+    order_id BIGINT NULL, # Made nullable as a workaround
     buyer_id BIGINT NOT NULL,
     product_id BIGINT NOT NULL,
     rating INT NOT NULL CHECK (rating >= 1 AND rating <= 5), -- Added CHECK constraint for rating

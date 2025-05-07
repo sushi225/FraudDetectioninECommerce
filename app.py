@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 import bcrypt
 import pandas as pd
 from datetime import datetime, date # Added date for blacklist duration
-from utils import log_activity, check_blacklist, get_db_connection # Moved get_db_connection here for consistency
+from utils import log_activity, check_blacklist, get_db_connection, get_all_reviews, get_all_customer_tickets # Moved get_db_connection here for consistency
 from fraud_detection import run_fraud_checks # Import fraud detection function
 
 # Load environment variables from .env file
@@ -277,8 +277,8 @@ else:
         st.title("Admin Dashboard")
 
         # 2. Tabs
-        tab_overview, tab_users, tab_wallet, tab_activity, tab_anomaly = st.tabs([
-            "Overview", "User Management", "Wallet Management", "Activity Log", "Anomaly Log"
+        tab_overview, tab_users, tab_wallet, tab_activity, tab_anomaly, tab_all_reviews, tab_all_tickets = st.tabs([
+            "Overview", "User Management", "Wallet Management", "Activity Log", "Anomaly Log", "All Reviews", "All Customer Tickets"
         ])
 
         # Fetch data needed across multiple tabs once
@@ -470,6 +470,26 @@ else:
             else:
                 st.info("No anomaly logs found.")
 
+# --- All Reviews Tab ---
+        with tab_all_reviews:
+            st.header("All Product Reviews")
+            all_reviews_data = get_all_reviews(conn_tabs)
+            if all_reviews_data:
+                reviews_df = pd.DataFrame(all_reviews_data)
+                # Display relevant columns, adjust as needed
+                st.dataframe(reviews_df[['id', 'product_name', 'buyer_email', 'rating', 'text', 'review_date']], use_container_width=True)
+            else:
+                st.info("No reviews found.")
+# --- All Customer Tickets Tab ---
+        with tab_all_tickets:
+            st.header("All Customer Support Tickets")
+            all_tickets_data = get_all_customer_tickets(conn_tabs)
+            if all_tickets_data:
+                tickets_df = pd.DataFrame(all_tickets_data)
+                # Display relevant columns, adjust as needed
+                st.dataframe(tickets_df[['id', 'buyer_email', 'subject', 'status', 'created_at', 'order_id']], use_container_width=True)
+            else:
+                st.info("No customer support tickets found.")
         # Close the connection used for fetching tab data
         if conn_tabs and conn_tabs.is_connected():
             conn_tabs.close()
@@ -668,18 +688,20 @@ else:
             if seller_transactions:
                 df_transactions = pd.DataFrame(seller_transactions)
                 # Format amount
-                df_transactions['amount'] = df_transactions['total_amount_cents'].apply(lambda x: f"₹{x / 100:.2f}")
-                # Format date
-                df_transactions['transaction_date'] = pd.to_datetime(df_transactions['transaction_date']).dt.strftime('%Y-%m-%d %H:%M:%S')
-                # Select and reorder columns
-                st.dataframe(df_transactions[['id', 'product_name', 'buyer_email', 'quantity', 'amount', 'status', 'transaction_date']])
+                df_transactions['amount'] = df_transactions['amount_cents'].apply(lambda x: f"₹{x / 100:.2f}") # Use correct column name
+                # Format date (using timestamp from query) and rename for display
+                df_transactions['transaction_date'] = pd.to_datetime(df_transactions['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+                # Select and reorder columns (removed quantity, status)
+                st.dataframe(df_transactions[['id', 'product_name', 'buyer_email', 'amount', 'transaction_date']])
             else:
                 st.info("No transactions found for your products yet.")
 
 
         with tab3:
             st.header("View Product Reviews")
+            print(f"DEBUG: Fetching reviews for seller_id: {st.session_state.user_id}") # DEBUG PRINT
             seller_reviews = get_seller_reviews(st.session_state.user_id)
+            print(f"DEBUG: Fetched reviews: {seller_reviews}") # DEBUG PRINT
             if seller_reviews:
                 df_reviews = pd.DataFrame(seller_reviews)
                  # Format date
@@ -1160,13 +1182,14 @@ else:
                 if not items_to_review:
                     st.info("No items currently available for review.")
                 else:
-                    options = {f"Order {item['order_id']} - {item['product_name']} (Product ID: {item['product_id']})": item for item in items_to_review}
+                    # Removed order_id from display string as it's not reliably available
+                    options = {f"{item['product_name']} (Product ID: {item['product_id']}, Transaction: {item['transaction_id']})": item for item in items_to_review}
                     selected_option = st.selectbox("Select Item to Review", options.keys())
 
                     if selected_option:
                         selected_item = options[selected_option]
                         product_id_to_review = selected_item['product_id']
-                        order_id_to_review = selected_item['order_id']
+                        # order_id_to_review = selected_item['order_id'] # Cannot reliably get order_id
 
                         with st.form("review_form", clear_on_submit=True):
                             rating = st.slider("Rating (1=Poor, 5=Excellent)", 1, 5, 3)
@@ -1186,26 +1209,32 @@ else:
                                          st.warning("Please provide some text for your review.")
                                     else:
                                         cursor = review_submit_conn.cursor()
+                                        # Modified INSERT to match Review schema (removed order_id, seller_id; changed review_date to created_at)
                                         insert_sql = """
-                                            INSERT INTO Review (order_id, buyer_id, product_id, seller_id, rating, text, review_date)
-                                            VALUES (%s, %s, %s, (SELECT seller_id FROM Product WHERE id = %s), %s, %s, %s)
+                                            INSERT INTO Review (buyer_id, product_id, rating, text, created_at)
+                                            VALUES (%s, %s, %s, %s, %s)
                                         """
-                                        # Fetch seller_id within the query
-                                        values = (order_id_to_review, st.session_state.user_id, product_id_to_review, product_id_to_review, rating, review_text, datetime.now())
+                                        # Removed order_id_to_review and seller_id subquery
+                                        values = (st.session_state.user_id, product_id_to_review, rating, review_text, datetime.now())
                                         cursor.execute(insert_sql, values)
                                         review_id = cursor.lastrowid
                                         review_submit_conn.commit()
+                                        print(f"DEBUG: Review submitted with ID: {review_id}") # DEBUG PRINT
                                         cursor.close()
 
                                         # Log activity
                                         log_activity(review_submit_conn, st.session_state.user_id, 'submit_review', f'Review ID: {review_id}')
+
+                                        # Clear cache to update review lists
+                                        st.cache_data.clear()
+                                        st.success("Review submitted successfully!")
+                                        # Consider adding st.rerun() if needed, but clearing cache might be enough
 
                                         # Run fraud checks
                                         run_fraud_checks(review_submit_conn, 'new_review', {
                                             'review_id': review_id,
                                             'buyer_id': st.session_state.user_id,
                                             'product_id': product_id_to_review,
-                                            'order_id': order_id_to_review,
                                             'rating': rating
                                         })
 
