@@ -1249,7 +1249,7 @@ else:
 
 
         # --- Main Buyer UI ---
-        st.title("Buyer Dashboard")
+        # st.title("Buyer Dashboard")
 
         # Display Wallet Balance
         buyer_conn_wallet = get_db_connection()
