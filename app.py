@@ -12,6 +12,9 @@ import time # For timed messages
 # Load environment variables from .env file
 load_dotenv()
 
+# Basic Page Configuration - MOVED UP
+st.set_page_config(page_title="E-com Detectify", layout="wide")
+
 # Handle timed blacklist message display
 if 'show_blacklisted_message_duration' in st.session_state:
     if st.session_state.show_blacklisted_message_duration > 0:
@@ -60,9 +63,6 @@ def login_user(email, password):
         if conn and conn.is_connected():
             conn.close() # Close connection after use
     return user, role
-
-# Basic Page Configuration
-st.set_page_config(page_title="E-com Detectify", layout="wide")
 # Custom CSS for theming
 custom_theme_css = f"""
 <style>
@@ -1415,37 +1415,73 @@ else:
                                         st.session_state.cart = cart
                                         # Log activity for adding to cart
                                         log_activity(add_conn, st.session_state.user_id, 'add_to_cart', f"Product ID: {product['id']}, Quantity: {quantity_to_add}")
-                                        st.cache_data.clear() # Clear product cache if needed, or specific cart cache
-                                        st.rerun() # Rerun to reflect cart changes
-                                        st.success(f"Added {quantity_to_add} of {product['name']} to cart.")
-                                        # ANOMALY AND BLACKLIST CHECKS START
+                                        
+                                        # ADDED BY ROO: Log to cart_events table for cart flipping detection
+                                        try:
+                                            # Ensure add_conn is valid and open before using
+                                            if add_conn and add_conn.is_connected():
+                                                with add_conn.cursor() as cart_event_cursor:
+                                                    cart_event_query = """
+                                                    INSERT INTO cart_events (buyer_id, product_id, quantity_changed, event_type)
+                                                    VALUES (%s, %s, %s, %s)
+                                                    """
+                                                    # Assuming quantity_to_add is the net quantity for this single 'add' event
+                                                    cart_event_cursor.execute(cart_event_query, (
+                                                        st.session_state.user_id,
+                                                        product['id'],
+                                                        quantity_to_add,
+                                                        'add'
+                                                    ))
+                                                # add_conn.commit() # Relying on autocommit=True from get_db_connection or handled by caller
+                                                print(f"[DEBUG_ROO] Logged 'add' to cart_events: User {st.session_state.user_id}, Product {product['id']}, Qty {quantity_to_add}")
+                                            else:
+                                                print(f"[DEBUG_ROO] add_conn not available for cart_events logging.")
+                                                st.warning("Could not log cart event due to DB connection issue.")
+                                        except mysql.connector.Error as ce_err:
+                                            print(f"Error logging to cart_events: {ce_err}")
+                                            st.warning(f"Could not log cart event for anomaly detection: {ce_err}")
+                                        except Exception as e_ce_generic:
+                                            print(f"Generic error logging to cart_events: {e_ce_generic}")
+                                            st.warning(f"Unexpected error logging cart event: {e_ce_generic}")
+                                        # END OF ADDED BY ROO
+
+                                        # ANOMALY AND BLACKLIST CHECKS START - MOVED UP
                                         db_conn_anomaly_check = None
+                                        blacklist_occurred_in_add_cart_check = False # Flag
                                         try:
                                             db_conn_anomaly_check = get_db_connection()
                                             if db_conn_anomaly_check and st.session_state.get('user_id') and st.session_state.get('role'):
-                                                current_user_id = st.session_state.user_id # Capture before potential deletion
-                                                current_user_role = st.session_state.role # Capture before potential deletion
-                                                run_all_user_anomaly_checks_and_log(db_conn_anomaly_check, current_user_id, current_user_role)
-                                                blacklist_result = check_and_blacklist_user_if_needed(db_conn_anomaly_check, current_user_id)
+                                                current_user_id_for_check = st.session_state.user_id
+                                                current_user_role_for_check = st.session_state.role
+                                                run_all_user_anomaly_checks_and_log(db_conn_anomaly_check, current_user_id_for_check, current_user_role_for_check)
+                                                blacklist_result = check_and_blacklist_user_if_needed(db_conn_anomaly_check, current_user_id_for_check)
                                                 if blacklist_result.get('blacklisted'):
+                                                    blacklist_occurred_in_add_cart_check = True
                                                     st.error("YOU ARE BLACKLISTED FOR ATTEMPTING TO FRAUD!")
-                                                    # Clear session state for logout, preserving blacklist message flag
-                                                    keys_to_del_on_blacklist_action = [k for k in st.session_state.keys() if k not in ['show_blacklisted_message_duration']]
-                                                    for k_del in keys_to_del_on_blacklist_action:
-                                                        del st.session_state[k_del]
+                                                    keys_to_del = [k for k in st.session_state.keys() if k not in ['show_blacklisted_message_duration']]
+                                                    for key_to_del in keys_to_del:
+                                                        del st.session_state[key_to_del]
                                                     st.session_state.logged_in = False
-                                                    st.session_state.user_id = None # Explicitly clear
-                                                    st.session_state.role = None # Explicitly clear
+                                                    st.session_state.user_id = None
+                                                    st.session_state.role = None
                                                     st.session_state.show_blacklisted_message_duration = 5
-                                                    st.rerun()
-                                        except mysql.connector.Error as e_anomaly:
-                                            st.warning(f"Database error during post-action anomaly/blacklist check: {e_anomaly}")
-                                        except Exception as e_generic_anomaly:
-                                            st.warning(f"Unexpected error during post-action anomaly/blacklist check: {e_generic_anomaly}")
+                                                    # Ensure connections are closed before this specific rerun
+                                                    if add_conn and add_conn.is_connected(): add_conn.close()
+                                                    if db_conn_anomaly_check and db_conn_anomaly_check.is_connected(): db_conn_anomaly_check.close()
+                                                    st.rerun() # Rerun immediately due to blacklisting
+                                        except mysql.connector.Error as e_anomaly_cart:
+                                            st.warning(f"DB error during cart anomaly/blacklist check: {e_anomaly_cart}")
+                                        except Exception as e_generic_cart_anomaly:
+                                            st.warning(f"Unexpected error during cart anomaly/blacklist check: {e_generic_cart_anomaly}")
                                         finally:
                                             if db_conn_anomaly_check and db_conn_anomaly_check.is_connected():
                                                 db_conn_anomaly_check.close()
-                                        # ANOMALY AND BLACKLIST CHECKS END
+                                        # ANOMALY AND BLACKLIST CHECKS END - MOVED UP
+
+                                        if not blacklist_occurred_in_add_cart_check: # Only proceed if not blacklisted in the above block
+                                            st.success(f"Added {quantity_to_add} of {product['name']} to cart.")
+                                            st.cache_data.clear() # Clear product cache if needed, or specific cart cache
+                                            st.rerun() # Rerun to reflect cart changes
 
                                 except mysql.connector.Error as err_add_cart_db:
                                     st.error(f"DB error adding to cart: {err_add_cart_db}")

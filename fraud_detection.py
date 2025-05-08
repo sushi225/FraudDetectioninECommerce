@@ -320,10 +320,10 @@ def check_rapid_transactions(db_cursor, user_id_param): # Renamed buyer_id to us
         time_ago = datetime.datetime.now() - timedelta(minutes=time_window_minutes)
         
         query = """
-        SELECT COUNT(*) 
-        FROM `Order` 
-        WHERE user_id = %s 
-          AND created_at >= %s
+        SELECT COUNT(*)
+        FROM `Order`
+        WHERE buyer_id = %s
+          AND order_date >= %s
         """
         db_cursor.execute(query, (user_id_param, time_ago))
         transaction_count_tuple = db_cursor.fetchone()
