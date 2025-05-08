@@ -169,8 +169,7 @@ def get_detected_anomalies(conn, limit=100):
             da.user_type,
             da.anomaly_type,
             da.detection_timestamp,
-            da.details,
-            da.triggering_event_ids
+            da.details
         FROM detected_anomalies da
         LEFT JOIN User u ON da.user_id = u.id
         ORDER BY da.detection_timestamp DESC

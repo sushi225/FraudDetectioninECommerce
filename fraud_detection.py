@@ -10,7 +10,7 @@ def log_anomaly_to_detected_anomalies(db_connection, cursor, user_id_val, adl_ev
     """
     Logs a specific user anomaly to the detected_anomalies table and system activity.
     Uses the provided cursor and db_connection; does not commit here.
-    The detected_anomalies table has: user_id, user_type, anomaly_type, details, triggering_event_ids.
+    The detected_anomalies table has: user_id, user_type, anomaly_type, details.
     """
     if not db_connection or not cursor:
         print("Error: DB connection or cursor not available for detailed anomaly logging to detected_anomalies.")
@@ -19,15 +19,14 @@ def log_anomaly_to_detected_anomalies(db_connection, cursor, user_id_val, adl_ev
     try:
         # timestamp = datetime.datetime.now() # Not needed for detected_anomalies as it has a default CURRENT_TIMESTAMP
         details_json = json.dumps(details_dict) if details_dict is not None else None
-        triggering_event_ids_val = None # As per instructions, pass None for now
 
         # Log to detected_anomalies table
         da_query = """
-        INSERT INTO detected_anomalies (user_id, user_type, anomaly_type, details, triggering_event_ids)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO detected_anomalies (user_id, user_type, anomaly_type, details)
+        VALUES (%s, %s, %s, %s)
         """
-        # Parameters: user_id_val, adl_event_type (maps to user_type), anomaly_type_str, details_json, triggering_event_ids_val
-        cursor.execute(da_query, (user_id_val, adl_event_type, anomaly_type_str, details_json, triggering_event_ids_val))
+        # Parameters: user_id_val, adl_event_type (maps to user_type), anomaly_type_str, details_json
+        cursor.execute(da_query, (user_id_val, adl_event_type, anomaly_type_str, details_json))
 
         # Log this detection event itself using log_activity
         log_activity_message = f"UserRoleContext: {adl_event_type}, Rule: {anomaly_type_str}, UserID: {user_id_val}, Details: {details_json} logged to detected_anomalies."

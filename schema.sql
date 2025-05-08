@@ -93,7 +93,6 @@ CREATE TABLE IF NOT EXISTS `detected_anomalies` (
   `anomaly_type` VARCHAR(255) NOT NULL COMMENT 'e.g., multiple_logins, rapid_transactions, cart_flipping, poor_reviews_seller, item_not_received_buyer',
   `detection_timestamp` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `details` TEXT NULL COMMENT 'JSON or textual details about the event (e.g., count, timeframe, specific IDs involved)',
-  `triggering_event_ids` TEXT NULL COMMENT 'Comma-separated list or JSON array of IDs from source tables (e.g., login_attempt_ids, order_ids, review_ids, customersupport_ids)',
   PRIMARY KEY (`anomaly_id`),
   INDEX `idx_detected_anomalies_user_time` (`user_id` ASC, `detection_timestamp` DESC),
   INDEX `idx_detected_anomalies_type` (`anomaly_type` ASC),
