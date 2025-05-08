@@ -5,11 +5,21 @@ from dotenv import load_dotenv
 import bcrypt
 import pandas as pd
 from datetime import datetime, date # Added date for blacklist duration
-from utils import log_activity, check_blacklist, get_db_connection, get_all_reviews, get_all_customer_tickets # Moved get_db_connection here for consistency
-from fraud_detection import run_fraud_checks # Import fraud detection function
+from utils import log_activity, check_blacklist, get_db_connection, get_all_reviews, get_all_customer_tickets, get_detected_anomalies # Moved get_db_connection here for consistency
+from fraud_detection import run_fraud_checks, run_all_user_anomaly_checks_and_log, check_and_blacklist_user_if_needed, count_user_anomalies, manually_blacklist_user_by_email, blacklist_user # Import fraud detection functions
+import time # For timed messages
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Handle timed blacklist message display
+if 'show_blacklisted_message_duration' in st.session_state:
+    if st.session_state.show_blacklisted_message_duration > 0:
+        st.error("YOU ARE BLACKLISTED FOR ATTEMPTING TO FRAUD! This message will disappear after a few interactions.")
+        st.session_state.show_blacklisted_message_duration -= 1
+    # Check if duration became <= 0 after decrementing, or if it was already <= 0
+    if 'show_blacklisted_message_duration' in st.session_state and st.session_state.show_blacklisted_message_duration <= 0:
+        del st.session_state['show_blacklisted_message_duration']
 
 # Database Connection Function
 # Moved get_db_connection to utils.py for central management
@@ -31,10 +41,17 @@ def login_user(email, password):
             if user_data:
                 # Verify password
                 stored_hash = user_data['password_hash']
+                if stored_hash is None:
+                    # Password hash is NULL, likely blacklisted user
+                    return None, "blacklisted" # Indicate blacklisted status
+
                 # Ensure both are bytes for bcrypt
                 if isinstance(stored_hash, str):
                     stored_hash = stored_hash.encode('utf-8')
-                if bcrypt.checkpw(password.encode('utf-8'), stored_hash):
+                
+                # It's possible bcrypt.checkpw could still fail if stored_hash is an empty string after encode
+                # but our primary concern here is None.
+                if stored_hash and bcrypt.checkpw(password.encode('utf-8'), stored_hash):
                     user = user_data['id']
                     role = user_data['role']
     except mysql.connector.Error as err:
@@ -48,7 +65,7 @@ def login_user(email, password):
 st.set_page_config(page_title="E-com Detectify", layout="wide")
 # Custom CSS for theming
 custom_theme_css = f"""
-&lt;style&gt;
+<style>
     :root {{
         --primary-color: red !important;
         --background-color: white !important;
@@ -66,7 +83,7 @@ custom_theme_css = f"""
     /* Ensure all text elements inherit the font and color */
     h1, h2, h3, h4, h5, h6, p, div, span, label, li, a, th, td,
     .stTextInput label, .stTextArea label, .stSelectbox label, .stDateInput label, .stNumberInput label, .stRadio label, .stCheckbox label,
-    .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] &gt; div,
+    .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] > div,
     .stDateInput input, .stNumberInput input,
     .stMetric, .stMetric label, .stMetric div[data-testid="stMetricValue"],
     .stDataFrame {{
@@ -75,23 +92,23 @@ custom_theme_css = f"""
     }}
 
     /* Buttons */
-    .stButton &gt; button {{
+    .stButton > button {{
         background-color: red !important;
         color: white !important; /* Text on red buttons */
         border: 1px solid red !important;
         font-family: "SF Pro Bold", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
     }}
-    .stButton &gt; button:hover {{
+    .stButton > button:hover {{
         background-color: darkred !important;
         border-color: darkred !important;
         color: white !important;
     }}
-    .stButton &gt; button:active {{
+    .stButton > button:active {{
         background-color: #b20000 !important; /* Even darker red for active state */
         border-color: #b20000 !important;
         color: white !important;
     }}
-    .stButton &gt; button:focus {{
+    .stButton > button:focus {{
         box-shadow: 0 0 0 0.2rem rgba(255, 0, 0, 0.5) !important;
     }}
 
@@ -115,7 +132,7 @@ custom_theme_css = f"""
         border-bottom-color: red !important; 
         box-shadow: none !important;
     }}
-    .stTabs [data-baseweb="tab"][aria-selected="true"] &gt; div {{
+    .stTabs [data-baseweb="tab"][aria-selected="true"] > div {{
          color: white !important; /* Ensure text within the active tab div is white */
     }}
 
@@ -126,7 +143,7 @@ custom_theme_css = f"""
     }}
 
     /* Input fields styling */
-    .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] &gt; div, .stDateInput input, .stNumberInput input {{
+    .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] > div, .stDateInput input, .stNumberInput input {{
         border-color: #ccc !important; /* A neutral border for inputs */
     }}
     .stTextInput input:focus, .stTextArea textarea:focus, .stSelectbox div[data-baseweb="select"]:focus-within, .stDateInput input:focus, .stNumberInput input:focus {{
@@ -143,7 +160,7 @@ custom_theme_css = f"""
         color: black !important;
     }}
 
-&lt;/style&gt;
+</style>
 """
 # st.markdown(custom_theme_css, unsafe_allow_html=True)
 
@@ -190,17 +207,97 @@ if not st.session_state.logged_in:
             
             if submitted:
                 user_id, role = login_user(email, password)
-                if user_id:
-                    st.session_state.logged_in = True
-                    st.session_state.user_id = user_id
-                    st.session_state.role = role
-                    conn = get_db_connection()
-                    if conn:
-                        log_activity(conn, user_id, 'login') # Log successful login
-                        if conn.is_connected():
-                             conn.close()
-                    st.rerun()
-                else:
+
+                if role == "blacklisted":
+                    st.error("User is Blacklisted. Access Denied!")
+                elif user_id:
+                    db_conn_pre_check = None
+                    cursor_pre_check = None
+                    perform_login_steps = True # Flag to control login progression
+
+                    try:
+                        db_conn_pre_check = get_db_connection()
+                        if not db_conn_pre_check:
+                            st.error("Database connection failed (pre-check). Please try again.")
+                            perform_login_steps = False
+                        else:
+                            cursor_pre_check = db_conn_pre_check.cursor(dictionary=True)
+                            cursor_pre_check.execute("SELECT status FROM User WHERE id = %s", (user_id,))
+                            user_status_details = cursor_pre_check.fetchone()
+
+                            if user_status_details and user_status_details['status'] == 'blacklisted':
+                                st.error("Your account has been suspended due to suspicious activity. Please contact support.")
+                                perform_login_steps = False
+                        
+                    except mysql.connector.Error as e_pre_check_db:
+                        st.error(f"Database error during pre-login check: {e_pre_check_db}")
+                        perform_login_steps = False
+                        print(f"Error during pre_login_check DB: {e_pre_check_db}")
+                    except Exception as e_pre_check_generic:
+                        st.error(f"An unexpected error occurred during pre-login check: {e_pre_check_generic}")
+                        perform_login_steps = False
+                        print(f"Error during pre_login_check_generic: {e_pre_check_generic}")
+                    finally:
+                        if cursor_pre_check:
+                            cursor_pre_check.close()
+                        if db_conn_pre_check and db_conn_pre_check.is_connected():
+                            db_conn_pre_check.close()
+
+                    if perform_login_steps:
+                        st.session_state.logged_in = True
+                        st.session_state.user_id = user_id
+                        st.session_state.role = role
+
+                        conn_post_login = None
+                        try:
+                            conn_post_login = get_db_connection()
+                            if not conn_post_login:
+                                st.warning("Could not establish connection for post-login checks. Login proceeded but some checks might be skipped.")
+                                log_activity(None, user_id, 'login_warning_no_db_for_post_checks') # Log warning
+                            else:
+                                log_activity(conn_post_login, user_id, 'login')
+
+                                current_user_id_for_checks = st.session_state.user_id
+                                current_user_role_for_checks = st.session_state.role
+
+                                print(f"Running post-login anomaly checks for user: {current_user_id_for_checks}")
+                                run_all_user_anomaly_checks_and_log(conn_post_login, current_user_id_for_checks, current_user_role_for_checks)
+                                
+                                print(f"Running post-login blacklist check for user: {current_user_id_for_checks}")
+                                blacklist_result = check_and_blacklist_user_if_needed(conn_post_login, current_user_id_for_checks)
+                                
+                                if blacklist_result.get('blacklisted'):
+                                    st.error("YOU ARE BLACKLISTED FOR ATTEMPTING TO FRAUD!")
+                                    keys_to_del_on_blacklist = [k for k in st.session_state.keys() if k not in ['show_blacklisted_message_duration']]
+                                    for k_del in keys_to_del_on_blacklist:
+                                        del st.session_state[k_del]
+                                    st.session_state.logged_in = False
+                                    st.session_state.show_blacklisted_message_duration = 5
+                                    # No st.rerun() here, it will be handled by the final rerun outside this block if not blacklisted
+                                    # or by the immediate rerun after this 'if' block if blacklisted.
+                                    perform_login_steps = False # Mark that full login sequence (including final rerun) should not occur as user is now logged out.
+                                    st.rerun() # Rerun immediately to reflect blacklist and logout
+                                    # This st.rerun() is crucial for immediate effect of blacklisting.
+
+                        except mysql.connector.Error as e_post_login_db:
+                            st.error(f"Database error during post-login checks: {e_post_login_db}")
+                            print(f"Error during post_login_check DB: {e_post_login_db}")
+                            # Log this error but don't necessarily block the user if login itself was fine before this point
+                        except Exception as e_post_login_generic:
+                            st.error(f"An unexpected error occurred during post-login checks: {e_post_login_generic}")
+                            print(f"Error during post_login_check_generic: {e_post_login_generic}")
+                        finally:
+                            if conn_post_login and conn_post_login.is_connected():
+                                conn_post_login.close()
+                        
+                        # This rerun happens if user was not blacklisted pre-login, and not blacklisted post-login.
+                        if perform_login_steps: # Check flag again, as it might be set to False by post-login blacklisting
+                           st.rerun()
+                    # If perform_login_steps is False (due to pre-login blacklist or other pre-login error),
+                    # no st.rerun() happens here, allowing error messages to be displayed on the current page.
+                    # If blacklisted post-login, an st.rerun() already happened.
+
+                else: # This 'else' corresponds to 'if user_id:'
                     st.error("Invalid email or password")
 else:
     # --- Role-Based Dashboards ---
@@ -251,23 +348,6 @@ else:
             finally:
                 if cursor:
                     cursor.close()
-
-        @st.cache_data(ttl=60)
-        def get_recent_anomalies(_conn, limit=10):
-            """Fetches the latest anomaly logs."""
-            anomalies = []
-            cursor = None
-            try:
-                cursor = _conn.cursor(dictionary=True)
-                query = "SELECT id, event_type, reference_id, rule_triggered, timestamp FROM AnomalyDetectionLog ORDER BY timestamp DESC LIMIT %s"
-                cursor.execute(query, (limit,))
-                anomalies = cursor.fetchall()
-            except mysql.connector.Error as err:
-                st.error(f"Error fetching recent anomalies: {err}")
-            finally:
-                if cursor:
-                    cursor.close()
-            return anomalies
 
         @st.cache_data(ttl=120) # Cache counts for 2 minutes
         def get_count(_conn, table_name, condition="1=1"):
@@ -321,7 +401,7 @@ else:
                 cursor = _conn.cursor(dictionary=True)
                 query = """
                     SELECT l.id, l.timestamp, l.user_id, u.email as user_email, l.action, l.details
-                    FROM LoggingActivity l
+                    FROM activity_log l
                     LEFT JOIN User u ON l.user_id = u.id
                     ORDER BY l.timestamp DESC
                     LIMIT %s
@@ -334,23 +414,6 @@ else:
                 if cursor:
                     cursor.close()
             return logs
-
-        @st.cache_data(ttl=30)
-        def get_all_anomalies(_conn, limit=100):
-             """Fetches all anomaly logs."""
-             anomalies = []
-             cursor = None
-             try:
-                 cursor = _conn.cursor(dictionary=True)
-                 query = "SELECT * FROM AnomalyDetectionLog ORDER BY timestamp DESC LIMIT %s"
-                 cursor.execute(query, (limit,))
-                 anomalies = cursor.fetchall()
-             except mysql.connector.Error as err:
-                 st.error(f"Error fetching all anomalies: {err}")
-             finally:
-                 if cursor:
-                     cursor.close()
-             return anomalies
 
         # --- Admin Dashboard Main Logic ---
 
@@ -380,9 +443,14 @@ else:
         st.title("Admin Dashboard")
 
         # 2. Tabs
-        tab_overview, tab_users, tab_create_user, tab_wallet, tab_activity, tab_anomaly, tab_all_reviews, tab_all_tickets = st.tabs([
-            "Overview", "User Management", "Create User", "Wallet Management", "Activity Log", "Anomaly Log", "All Reviews", "All Customer Tickets"
-        ])
+        admin_tab_names = [
+            "Overview", "User Management", "Create User", "Wallet Management",
+            "Activity Log", "Anomaly Log", "All Reviews", "All Customer Tickets",
+            "Manual User Blacklist", "View Anomaly Logs" # New tab
+        ]
+        tab_overview, tab_users, tab_create_user, tab_wallet, \
+        tab_activity, tab_anomaly, tab_all_reviews, tab_all_tickets, \
+        tab_manual_blacklist, tab_view_anomaly_logs = st.tabs(admin_tab_names)
 
         # Fetch data needed across multiple tabs once
         conn_tabs = get_db_connection()
@@ -396,9 +464,14 @@ else:
         # --- Overview Tab ---
         with tab_overview:
             st.subheader("Recent Anomaly Alerts")
-            recent_anomalies = get_recent_anomalies(conn_tabs)
+            # Use the imported get_detected_anomalies from utils.py
+            recent_anomalies = get_detected_anomalies(conn_tabs, limit=10)
             if recent_anomalies:
-                st.dataframe(pd.DataFrame(recent_anomalies), use_container_width=True)
+                # Ensure the DataFrame conversion handles the new column names from get_detected_anomalies
+                df_recent_anomalies = pd.DataFrame(recent_anomalies)
+                # Select and rename columns to match expected display if necessary, or adjust display logic
+                # For now, displaying all columns returned by get_detected_anomalies
+                st.dataframe(df_recent_anomalies, use_container_width=True)
             else:
                 st.info("No recent anomalies detected.")
 
@@ -411,250 +484,299 @@ else:
                 st.metric("Total Products", get_count(conn_tabs, "Product"))
             with col3:
                  # Use backticks for reserved SQL keywords like Order
-                st.metric("Total Orders", get_count(conn_tabs, "`Order`"))
+                st.metric("Total Orders", get_count(conn_tabs, "`Order`")) # Use backticks
             with col4:
-                st.metric("Open Support Tickets", get_count(conn_tabs, "CustomerSupport", "status='open'")) # Example with condition
+                pending_reviews_count = 0
+                try:
+                    with conn_tabs.cursor(dictionary=True) as cursor:
+                        query = """
+                        SELECT COUNT(Review.id) AS review_count
+                        FROM Review
+                        JOIN User ON Review.buyer_id = User.id
+                        WHERE User.status = 'active';
+                        """
+                        cursor.execute(query)
+                        result = cursor.fetchone()
+                        if result and 'review_count' in result:
+                            pending_reviews_count = result['review_count']
+                except Exception as e:
+                    # Log this error appropriately in a real application
+                    print(f"Error getting pending reviews count: {e}")
+                st.metric("Pending Reviews", pending_reviews_count)
 
         # --- User Management Tab ---
         with tab_users:
             st.header("User Management")
-            st.dataframe(users_df, use_container_width=True)
-
-            st.divider()
-            st.subheader("Blacklist User")
-
             if not users_df.empty:
+                # Add a 'Select' column for actions
+                # users_df['Select'] = False # This creates a checkbox column, but might not be ideal for actions
+                st.dataframe(users_df[['id', 'email', 'role', 'created_at']], use_container_width=True)
+
+                st.subheader("Blacklist User")
                 col1, col2 = st.columns([1, 2])
                 with col1:
-                     selected_user_id_blacklist = st.selectbox(
-                         "Select User ID to Blacklist",
-                         options=users_df['id'],
-                         key="blacklist_user_select" # Unique key
-                     )
-                # Form needs to be outside columns if submit button is shared, or inside if specific to a column
+                    user_id_to_blacklist = st.selectbox(
+                        "Select User ID to Blacklist/Unblacklist",
+                        options=users_df['id'].tolist(),
+                        key="user_id_blacklist_selectbox"
+                    )
                 with st.form("blacklist_form"):
-                    reason = st.text_area("Reason for Blacklist*", help="Provide a clear reason for blacklisting.")
-                    blocked_until_date = st.date_input("Block Until (Optional)", value=None, min_value=date.today())
-                    submitted_blacklist = st.form_submit_button("Blacklist User")
+                    action_type = st.radio("Action", ["Blacklist", "Unblacklist"], key="blacklist_action_radio")
+                    reason = st.text_input("Reason (for blacklisting)", key="blacklist_reason_text")
+                    submitted_blacklist = st.form_submit_button(f"{action_type} User")
 
                     if submitted_blacklist:
-                        if not reason:
-                            st.warning("Reason is required to blacklist a user.")
-                        elif selected_user_id_blacklist == st.session_state.user_id:
-                             st.error("Admin cannot blacklist themselves through this interface.")
+                        if action_type == "Blacklist" and not reason:
+                            st.warning("Please provide a reason for blacklisting.")
                         else:
                             blacklist_conn = None
                             try:
                                 blacklist_conn = get_db_connection()
-                                if not blacklist_conn: raise Exception("DB Connection failed")
+                                if not blacklist_conn: raise Exception("DB connection failed")
+                                cursor = blacklist_conn.cursor(dictionary=True) # Use dictionary cursor
+                                if action_type == "Blacklist":
+                                    # Fetch user's email to use with manually_blacklist_user_by_email
+                                    cursor.execute("SELECT email FROM User WHERE id = %s", (user_id_to_blacklist,))
+                                    user_data = cursor.fetchone()
+                                    if user_data:
+                                        target_email = user_data['email']
+                                        admin_id = st.session_state.user_id # Assuming admin's ID is in session
+                                        
+                                        # Call the existing function from fraud_detection.py
+                                        # This function handles setting User.status and inserting into blacklisted_users
+                                        # It also handles its own commit/rollback within the function.
+                                        # We pass the connection, but it might open its own if not careful.
+                                        # For now, let's assume it uses the passed connection and cursor appropriately or handles its own.
+                                        # The manually_blacklist_user_by_email function in fraud_detection.py
+                                        # already commits or rolls back.
+                                        
+                                        # Re-checking manually_blacklist_user_by_email, it creates its own cursor
+                                        # and commits. So we don't need to commit here for this path.
+                                        # We also don't need the cursor from this scope for this specific call.
+                                        
+                                        # We need to ensure fraud_detection.manually_blacklist_user_by_email
+                                        # uses the passed connection or we manage transactions carefully.
+                                        # For simplicity, we'll let it manage its transaction.
+                                        
+                                        # The function `manually_blacklist_user_by_email` expects a connection,
+                                        # target_email, admin_user_id, and manual_reason.
+                                        # It will then find the user_id from the email.
+                                        
+                                        # Since we already have user_id_to_blacklist, it might be more direct
+                                        # to call fraud_detection.blacklist_user if it were exposed and suitable,
+                                        # or adapt the logic here.
+                                        # fraud_detection.blacklist_user(conn, user_id, reason) looks suitable.
 
-                                cursor = blacklist_conn.cursor()
-                                # Use REPLACE INTO to handle cases where user might already be blacklisted (updates the reason/date)
-                                # Or use INSERT IGNORE if you only want to insert if not present
-                                query = """
-                                    REPLACE INTO Blacklist (user_id, reason, blocked_until, created_at, admin_id)
-                                    VALUES (%s, %s, %s, %s, %s)
-                                """
-                                # Convert date to string or pass None directly
-                                blocked_until_sql = blocked_until_date if blocked_until_date else None
-                                values = (selected_user_id_blacklist, reason, blocked_until_sql, datetime.now(), st.session_state.user_id)
-                                cursor.execute(query, values)
-                                blacklist_conn.commit()
-
-                                log_activity(blacklist_conn, st.session_state.user_id, 'blacklist_user',
-                                             f'Target User ID: {selected_user_id_blacklist}, Reason: {reason}, Until: {blocked_until_sql}')
-                                blacklist_conn.commit() # Commit log
-
-                                st.success(f"User ID {selected_user_id_blacklist} has been blacklisted/updated.")
-                                st.cache_data.clear() # Clear relevant caches if needed
-                                cursor.close()
+                                        # Let's use fraud_detection.blacklist_user directly
+                                        
+                                        # The blacklist_user function in fraud_detection.py handles the commit.
+                                        # It takes (db_connection, user_id, reason)
+                                        blacklist_user(blacklist_conn, user_id_to_blacklist, reason)
+                                        # The blacklist_user function already logs activity.
+                                        st.success(f"User ID {user_id_to_blacklist} ({target_email}) blacklisted. Reason: {reason}")
+                                        # No explicit commit here as blacklist_user handles it.
+                                    else:
+                                        st.error(f"User ID {user_id_to_blacklist} not found.")
+                                else: # Unblacklist
+                                    # Update User status
+                                    cursor.execute("UPDATE User SET status = 'active' WHERE id = %s", (user_id_to_blacklist,))
+                                    # Remove from blacklisted_users table
+                                    cursor.execute("DELETE FROM blacklisted_users WHERE user_id = %s", (user_id_to_blacklist,))
+                                    blacklist_conn.commit() # Commit these changes
+                                    log_activity(blacklist_conn, st.session_state.user_id, 'unblacklist_user', f'User ID: {user_id_to_blacklist}')
+                                    st.success(f"User {user_id_to_blacklist} unblacklisted.")
+                                
+                                if cursor: # Close cursor if it was opened and used
+                                    cursor.close()
+                                st.cache_data.clear() # Clear user cache
                                 st.rerun()
-
                             except mysql.connector.Error as err:
                                 if blacklist_conn: blacklist_conn.rollback()
-                                st.error(f"Database error during blacklisting: {err}")
+                                st.error(f"Database error: {err}")
                             except Exception as e:
-                                st.error(f"An error occurred: {e}")
+                                st.error(f"Error: {e}")
                             finally:
                                 if blacklist_conn and blacklist_conn.is_connected():
                                     blacklist_conn.close()
             else:
-                st.info("No users found to manage.")
+                st.info("No users found.")
 
-
-# --- Create User Tab ---
+        # --- Create User Tab ---
         with tab_create_user:
             st.header("Create New User")
-
             def get_next_user_number(conn_db, role_prefix_str):
                 """Determines the next sequential number for a user based on role."""
-                cursor_next_num = None
-                next_number_val = 1
+                # Example: if role_prefix_str is "buyer", look for "buyer_1@example.com", "buyer_2@example.com", etc.
+                # This is a simplified example; a robust solution might involve a separate sequence or more complex querying.
+                cursor = None
                 try:
-                    cursor_next_num = conn_db.cursor()
-                    query_next_num = "SELECT email FROM User WHERE email LIKE %s ORDER BY id DESC" # Check existing emails
-                    cursor_next_num.execute(query_next_num, (f"{role_prefix_str}%@example.com",))
+                    cursor = conn_db.cursor(dictionary=True)
+                    # A more robust way to get the max number from email
+                    # This query assumes email format like 'prefix_number@example.com'
+                    # It extracts the number part and finds the maximum.
+                    # This is highly specific and might need adjustment based on actual email patterns.
+                    # For simplicity, we'll use a basic count for now, but this is where you'd put more complex logic.
                     
-                    max_num_found = 0
-                    for row_email in cursor_next_num.fetchall():
-                        email_addr_str = row_email[0]
-                        try:
-                            # Extract number: buyer123@example.com -> 123
-                            num_part_str = email_addr_str.replace(role_prefix_str, "").split('@')[0]
-                            if num_part_str.isdigit():
-                                current_num = int(num_part_str)
-                                if current_num > max_num_found:
-                                    max_num_found = current_num
-                        except ValueError:
-                            continue # Skip if parsing fails for any reason
-                    next_number_val = max_num_found + 1
-                except mysql.connector.Error as err_next_num:
-                    st.error(f"Error determining next user number for {role_prefix_str}: {err_next_num}")
-                    # In case of error, this might lead to duplicate numbers if not handled carefully,
-                    # or we could decide to stop creation. For now, it defaults to 1 or max_found + 1.
+                    # Simplified: Count existing users of that role and add 1
+                    # This is NOT robust for generating unique emails if users can be deleted or emails change.
+                    # query_count = "SELECT COUNT(*) as count FROM User WHERE role = %s"
+                    # cursor.execute(query_count, (role_prefix_str,))
+                    # count_result = cursor.fetchone()
+                    # return (count_result['count'] + 1) if count_result else 1
+
+                    # Attempt to find the highest number in existing emails for that role
+                    # This is still a bit naive and depends on a strict naming convention.
+                    query_max_num = f"SELECT email FROM User WHERE email LIKE '{role_prefix_str}\\_%@example.com'" # Escape underscore
+                    cursor.execute(query_max_num)
+                    existing_emails = cursor.fetchall()
+                    max_num = 0
+                    if existing_emails:
+                        for row_email in existing_emails:
+                            email_addr_str = row_email['email'] # Corrected: access by key
+                            try:
+                                # Extract number: e.g., "buyer_123@example.com" -> "123"
+                                num_part = email_addr_str.split('@')[0].split('_')[-1]
+                                if num_part.isdigit():
+                                    max_num = max(max_num, int(num_part))
+                            except Exception:
+                                pass # Ignore if parsing fails for some email
+                    return max_num + 1
+
+                except mysql.connector.Error as e:
+                    st.error(f"DB error getting next user number: {e}")
+                    return 1 # Fallback
                 finally:
-                    if cursor_next_num:
-                        cursor_next_num.close()
-                return next_number_val
+                    if cursor:
+                        cursor.close()
 
             with st.form("create_user_form", clear_on_submit=True):
-                st.subheader("New User Details")
-                new_user_role_selection = st.selectbox("Select Role", ["buyer", "seller"], key="new_user_role_select")
-                new_user_password_input = st.text_input("Enter Password", type="password", key="new_user_password_input")
-                
-                create_user_button = st.form_submit_button("Create New User")
+                new_email_prefix = st.text_input("Email Prefix (e.g., testuser)", key="new_email_prefix")
+                new_password = st.text_input("Password", type="password", key="new_password")
+                new_role = st.selectbox("Role", ["buyer", "seller", "admin"], key="new_role_select")
+                submitted_create = st.form_submit_button("Create User")
 
-                if create_user_button:
-                    if not new_user_password_input:
-                        st.warning("Password is required to create a new user.")
+                if submitted_create:
+                    if not new_email_prefix or not new_password:
+                        st.warning("Please provide an email prefix and password.")
                     else:
                         conn_create_user = None
                         try:
                             conn_create_user = get_db_connection()
-                            if not conn_create_user:
-                                st.error("Database connection failed. Cannot create user.")
-                                st.stop()
+                            if not conn_create_user: raise Exception("DB connection failed for user creation")
 
-                            # Determine the next email number
-                            next_user_seq_num = get_next_user_number(conn_create_user, new_user_role_selection)
-                            generated_email = f"{new_user_role_selection}{next_user_seq_num}@example.com"
+                            # Determine next user number for the email
+                            # This is a placeholder for a more robust unique email generation
+                            # For example, you might query the DB for the highest existing number for that role.
+                            # user_number = get_next_user_number(conn_create_user, new_role.lower())
+                            # new_email = f"{new_email_prefix}_{user_number}@{os.getenv('DEFAULT_EMAIL_DOMAIN', 'example.com')}"
                             
-                            # Hash the password
-                            password_bytes = new_user_password_input.encode('utf-8')
-                            hashed_password_bytes = bcrypt.hashpw(password_bytes, bcrypt.gensalt())
-                            hashed_password_str = hashed_password_bytes.decode('utf-8') # Store as string
-                            
-                            cursor_insert_user = conn_create_user.cursor()
-                            insert_query = "INSERT INTO User (email, password_hash, role) VALUES (%s, %s, %s)"
-                            insert_values = (generated_email, hashed_password_str, new_user_role_selection)
-                            
-                            cursor_insert_user.execute(insert_query, insert_values)
-                            newly_created_user_id = cursor_insert_user.lastrowid
-                            conn_create_user.commit()
-                            
-                            log_activity(conn_create_user, st.session_state.user_id, 'admin_create_user', 
-                                         f'Created User ID: {newly_created_user_id}, Email: {generated_email}, Role: {new_user_role_selection}')
-                            conn_create_user.commit() # Commit the log
+                            # Simpler email generation for now, ensure it's unique
+                            # This is still not guaranteed unique if run concurrently, needs DB constraint
+                            timestamp_suffix = int(time.time() * 1000) # milliseconds for more uniqueness
+                            new_email = f"{new_email_prefix}_{timestamp_suffix}@{os.getenv('DEFAULT_EMAIL_DOMAIN', 'example.com')}"
 
-                            st.success(f"User '{generated_email}' ({new_user_role_selection.capitalize()}) created successfully with ID: {newly_created_user_id}!")
-                            
-                            # Clear caches that might hold user lists
-                            st.cache_data.clear() 
-                            cursor_insert_user.close()
-                            st.rerun() # Rerun to refresh lists and clear form
 
-                        except mysql.connector.Error as db_err:
-                            if conn_create_user:
-                                conn_create_user.rollback()
-                            st.error(f"Database error during user creation: {db_err}")
-                            if "Duplicate entry" in str(db_err) and "for key 'User.email'" in str(db_err):
-                                st.warning(f"The email '{generated_email}' might already exist. Please try again or check logs.")
+                            hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+                            
+                            cursor = conn_create_user.cursor()
+                            # Check if email already exists
+                            cursor.execute("SELECT id FROM User WHERE email = %s", (new_email,))
+                            if cursor.fetchone():
+                                st.error(f"Email {new_email} already exists. Try a different prefix or wait a moment.")
+                            else:
+                                cursor.execute(
+                                    "INSERT INTO User (email, password_hash, role) VALUES (%s, %s, %s)",
+                                    (new_email, hashed_password.decode('utf-8'), new_role) # Store hash as string
+                                )
+                                new_user_id = cursor.lastrowid
+                                conn_create_user.commit()
+                                
+                                # Log activity for user creation
+                                log_activity(conn_create_user, st.session_state.user_id, 'create_user', f'New User ID: {new_user_id}, Email: {new_email}, Role: {new_role}')
+                                
+                                # Optionally, create a wallet for the new user
+                                if new_role == 'buyer' or new_role == 'seller':
+                                     cursor.execute("INSERT INTO Wallet (user_id, balance_cents) VALUES (%s, %s) ON DUPLICATE KEY UPDATE user_id=user_id", (new_user_id, 0)) # Ensure wallet exists, 0 balance
+                                     conn_create_user.commit()
+
+                                st.success(f"User {new_email} ({new_role}) created successfully with ID: {new_user_id}!")
+                                st.cache_data.clear() # Clear user cache
+                                # No st.rerun() needed due to clear_on_submit=True and form behavior
+                            cursor.close()
+                        except mysql.connector.Error as err:
+                            if conn_create_user: conn_create_user.rollback()
+                            st.error(f"Database error creating user: {err}")
                         except Exception as e:
-                            st.error(f"An unexpected error occurred: {e}")
+                            st.error(f"Error creating user: {e}")
                         finally:
                             if conn_create_user and conn_create_user.is_connected():
                                 conn_create_user.close()
+        
         # --- Wallet Management Tab ---
         with tab_wallet:
             st.header("Wallet Management")
-
             if not users_df.empty:
                 col1_wallet, col2_wallet = st.columns([1, 2])
                 with col1_wallet:
                     selected_user_id_wallet = st.selectbox(
-                        "Select User ID to Manage Wallet",
-                        options=users_df['id'],
-                        key="wallet_user_select" # Unique key
+                        "Select User ID for Wallet",
+                        options=users_df['id'].tolist(), # Show all users
+                        key="user_id_wallet_select"
                     )
-
-                    # Display current balance
-                    current_balance_cents = get_wallet_balance(conn_tabs, selected_user_id_wallet)
-                    st.metric(f"Current Balance (User {selected_user_id_wallet})", f"₹{current_balance_cents / 100:.2f}")
+                    if selected_user_id_wallet:
+                        current_balance_cents = get_wallet_balance(conn_tabs, selected_user_id_wallet)
+                        st.metric(f"Current Balance for User {selected_user_id_wallet}", f"${current_balance_cents / 100:.2f}")
 
                 with col2_wallet:
                     st.subheader("Adjust Wallet Balance")
                     with st.form("wallet_adjust_form"):
-                        adjustment_amount_inr = st.number_input(
-                            "Amount to Add/Subtract (INR)",
-                            format="%.2f",
-                            step=10.0,
-                            help="Positive value adds funds, negative value subtracts funds."
-                        )
-                        adjustment_reason = st.text_input("Reason for Adjustment*")
+                        adjustment_amount_dollars = st.number_input("Adjustment Amount (USD)", value=0.0, step=0.01, format="%.2f", key="wallet_adj_amount")
+                        adjustment_type = st.radio("Action", ["Add to Balance", "Subtract from Balance"], key="wallet_adj_type")
+                        reason_wallet = st.text_input("Reason for adjustment", key="wallet_adj_reason")
                         submitted_wallet_adjust = st.form_submit_button("Adjust Balance")
 
                         if submitted_wallet_adjust:
-                            if not adjustment_reason:
-                                st.warning("Reason is required for wallet adjustment.")
-                            elif adjustment_amount_inr == 0:
-                                st.warning("Adjustment amount cannot be zero.")
-                            else:
+                            if not reason_wallet:
+                                st.warning("Please provide a reason for the wallet adjustment.")
+                            elif selected_user_id_wallet:
+                                adjustment_amount_cents = int(adjustment_amount_dollars * 100)
+                                if adjustment_type == "Subtract from Balance":
+                                    adjustment_amount_cents *= -1
+                                
                                 wallet_conn = None
                                 try:
                                     wallet_conn = get_db_connection()
-                                    if not wallet_conn: raise Exception("DB Connection failed")
-
-                                    adjustment_amount_cents = int(adjustment_amount_inr * 100)
-
-                                    # Check current balance if subtracting to prevent negative balance (optional rule)
-                                    # current_bal = get_wallet_balance(wallet_conn, selected_user_id_wallet)
-                                    # if adjustment_amount_cents < 0 and current_bal + adjustment_amount_cents < 0:
-                                    #     st.error("Adjustment failed: Insufficient funds.")
-                                    # else:
+                                    if not wallet_conn: raise Exception("DB connection failed for wallet adjustment")
 
                                     success = update_wallet_balance(wallet_conn, selected_user_id_wallet, adjustment_amount_cents)
-
                                     if success:
-                                        log_activity(wallet_conn, st.session_state.user_id, 'adjust_wallet',
-                                                     f'Target User ID: {selected_user_id_wallet}, Amount Cents: {adjustment_amount_cents}, Reason: {adjustment_reason}')
-                                        wallet_conn.commit() # Commit wallet update and log
-                                        st.success(f"Wallet for User ID {selected_user_id_wallet} adjusted by ₹{adjustment_amount_inr:.2f}.")
-                                        st.cache_data.clear() # Clear cache to reflect changes
-                                        st.rerun() # Rerun to update UI
-                                        wallet_conn.commit() # Commit update and log
-                                        st.success(f"Wallet balance for User ID {selected_user_id_wallet} adjusted successfully.")
-                                        st.cache_data.clear() # Clear balance cache
-                                        st.rerun()
+                                        wallet_conn.commit()
+                                        log_activity(wallet_conn, st.session_state.user_id, 'adjust_wallet', f'User ID: {selected_user_id_wallet}, Amount Cents: {adjustment_amount_cents}, Reason: {reason_wallet}')
+                                        st.success(f"Wallet for User {selected_user_id_wallet} adjusted by ${adjustment_amount_dollars:.2f}.")
+                                        st.cache_data.clear() # Clear wallet balance cache
+                                        st.rerun() # Rerun to show updated balance
                                     else:
-                                        # Error already shown by update_wallet_balance
-                                        wallet_conn.rollback()
+                                        st.error("Failed to update wallet balance (function returned false).")
+                                        if wallet_conn: wallet_conn.rollback() # Rollback if update function indicated failure but didn't raise DB error
 
                                 except mysql.connector.Error as err:
                                     if wallet_conn: wallet_conn.rollback()
-                                    st.error(f"Database error during wallet adjustment: {err}")
+                                    st.error(f"Database error adjusting wallet: {err}")
                                 except Exception as e:
-                                     st.error(f"An error occurred: {e}")
+                                    st.error(f"Error adjusting wallet: {e}")
                                 finally:
                                     if wallet_conn and wallet_conn.is_connected():
                                         wallet_conn.close()
+                            else:
+                                st.warning("Please select a user.")
             else:
-                 st.info("No users found to manage wallets.")
+                st.info("No users found to manage wallets.")
 
 
         # --- Activity Log Tab ---
         with tab_activity:
-            st.header("Platform Activity Log")
-            activity_logs = get_all_logs(conn_tabs)
+            st.header("Recent Activity Log")
+            activity_logs = get_all_logs(conn_tabs, limit=200) # Fetch more logs
             if activity_logs:
                 st.dataframe(pd.DataFrame(activity_logs), use_container_width=True)
             else:
@@ -663,63 +785,139 @@ else:
         # --- Anomaly Log Tab ---
         with tab_anomaly:
             st.header("Anomaly Detection Log")
-            anomaly_logs = get_all_anomalies(conn_tabs)
+            # Use the imported get_detected_anomalies from utils.py
+            anomaly_logs = get_detected_anomalies(conn_tabs, limit=200) # Fetch more anomalies
             if anomaly_logs:
-                st.dataframe(pd.DataFrame(anomaly_logs), use_container_width=True)
+                # Ensure the DataFrame conversion handles the new column names
+                df_anomaly_logs = pd.DataFrame(anomaly_logs)
+                # Display all columns returned by get_detected_anomalies
+                st.dataframe(df_anomaly_logs, use_container_width=True)
             else:
-                st.info("No anomaly logs found.")
-
-# --- All Reviews Tab ---
+                st.info("No anomalies detected.")
+        
+        # --- All Reviews Tab (Admin) ---
         with tab_all_reviews:
             st.header("All Product Reviews")
-            all_reviews_data = get_all_reviews(conn_tabs)
+            all_reviews_data = get_all_reviews(conn_tabs) # Using the function from utils
             if all_reviews_data:
                 reviews_df = pd.DataFrame(all_reviews_data)
-                # Display relevant columns, adjust as needed
-                st.dataframe(reviews_df[['id', 'product_name', 'buyer_email', 'rating', 'text', 'review_date']], use_container_width=True)
+                st.dataframe(reviews_df, use_container_width=True)
             else:
                 st.info("No reviews found.")
-# --- All Customer Tickets Tab ---
+
+        # --- All Customer Tickets Tab (Admin) ---
         with tab_all_tickets:
             st.header("All Customer Support Tickets")
-            all_tickets_data = get_all_customer_tickets(conn_tabs)
+            all_tickets_data = get_all_customer_tickets(conn_tabs) # Using the function from utils
             if all_tickets_data:
                 tickets_df = pd.DataFrame(all_tickets_data)
-                # Display relevant columns, adjust as needed
-                st.dataframe(tickets_df[['id', 'buyer_email', 'subject', 'status', 'created_at', 'order_id']], use_container_width=True)
+                st.dataframe(tickets_df, use_container_width=True)
             else:
                 st.info("No customer support tickets found.")
-        # Close the connection used for fetching tab data
-        if conn_tabs and conn_tabs.is_connected():
+
+        # --- Manual User Blacklist Tab (Admin) ---
+        with tab_manual_blacklist:
+            st.subheader("Manually Blacklist a User")
+            with st.form("manual_blacklist_form", clear_on_submit=True):
+                st.write("Enter the details of the user to manually blacklist:")
+                target_email_input = st.text_input("User's Email Address", key="manual_blacklist_email")
+                manual_reason_input = st.text_area("Reason for Blacklisting", key="manual_blacklist_reason")
+                submit_manual_blacklist = st.form_submit_button("Blacklist User")
+
+                if submit_manual_blacklist:
+                    if not target_email_input or not manual_reason_input:
+                        st.warning("Please provide both email and reason.")
+                    else:
+                        admin_id = st.session_state.user_id # Admin performing the action
+                        db_conn_manual_bl = None
+                        try:
+                            db_conn_manual_bl = get_db_connection()
+                            if db_conn_manual_bl:
+                                result = manually_blacklist_user_by_email(
+                                    db_conn_manual_bl,
+                                    target_email_input,
+                                    admin_id,
+                                    manual_reason_input
+                                )
+                                if result.get('success'):
+                                    st.success(result.get('message'))
+                                else:
+                                    st.error(result.get('message'))
+                            else:
+                                st.error("Failed to connect to the database.")
+                        except Exception as e_manual_bl:
+                            st.error(f"An error occurred: {e_manual_bl}")
+                            print(f"Error during manual blacklist form submission: {e_manual_bl}")
+                        finally:
+                            if db_conn_manual_bl and db_conn_manual_bl.is_connected():
+                                db_conn_manual_bl.close()
+        
+# --- View Anomaly Logs Tab (Admin) ---
+        with tab_view_anomaly_logs:
+            st.subheader("Detected Anomaly Logs")
+            db_conn_logs = None
+            try:
+                # Use the existing conn_tabs if it's still valid and open, otherwise get a new one.
+                # However, for simplicity and to ensure a fresh connection for this specific task,
+                # let's get a new connection. This also avoids issues if conn_tabs was closed earlier.
+                db_conn_logs = get_db_connection()
+                if db_conn_logs:
+                    # Add a refresh button
+                    if st.button("Refresh Anomaly Logs", key="refresh_detected_anomalies"):
+                        st.cache_data.clear() # Clear cache if get_detected_anomalies uses caching
+                        st.rerun()
+                        
+                    # Fetch logs using the imported function
+                    # The get_detected_anomalies function is assumed to exist in utils.py
+                    # and handle its own caching if necessary.
+                    anomaly_logs = get_detected_anomalies(db_conn_logs, limit=200) 
+                    
+                    if anomaly_logs:
+                        logs_df = pd.DataFrame(anomaly_logs)
+                        # Optional: Format timestamp for better readability
+                        if 'detection_timestamp' in logs_df.columns:
+                            logs_df['detection_timestamp'] = pd.to_datetime(logs_df['detection_timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        # Display raw details string for now
+                        st.dataframe(logs_df, use_container_width=True)
+                    else:
+                        st.info("No detected anomaly logs found.")
+                else:
+                    st.error("Failed to connect to the database to fetch anomaly logs.")
+            except Exception as e_logs:
+                st.error(f"An error occurred while fetching anomaly logs: {e_logs}")
+                print(f"Error in View Anomaly Logs tab: {e_logs}")
+            finally:
+                if db_conn_logs and db_conn_logs.is_connected():
+                    db_conn_logs.close()
+        if conn_tabs and conn_tabs.is_connected(): # Close the connection for tabs if open
             conn_tabs.close()
+
     elif st.session_state.role == 'seller':
         # --- Seller Dashboard ---
+        st.title("Seller Dashboard")
         conn_seller_init = get_db_connection() # Initial connection for blacklist check
         if not conn_seller_init:
             st.error("Database connection failed. Cannot load Seller Dashboard.")
             st.stop()
 
-        # 1. Blacklist Check (at the very beginning)
-        is_blacklisted = False
+        is_blacklisted_seller = False
         try:
-            is_blacklisted = check_blacklist(conn_seller_init, st.session_state.user_id)
+            is_blacklisted_seller = check_blacklist(conn_seller_init, st.session_state.user_id)
         except mysql.connector.Error as err:
-            st.error(f"Error checking blacklist status: {err}")
-            if conn_seller_init and conn_seller_init.is_connected(): conn_seller_init.close()
+            st.error(f"Error checking seller blacklist status: {err}")
             st.stop()
         finally:
-             # Close the initial connection after the check
-             if conn_seller_init and conn_seller_init.is_connected():
-                 conn_seller_init.close()
+            if conn_seller_init and conn_seller_init.is_connected():
+                conn_seller_init.close()
 
-        if is_blacklisted:
-            st.error("You are currently blacklisted and cannot perform actions.")
-            st.stop() # Stop execution for blacklisted sellers
+        if is_blacklisted_seller:
+            st.error("Your seller account is currently blacklisted. Access denied.")
+            log_activity(get_db_connection(), st.session_state.user_id, 'seller_blacklist_block', 'Seller attempted access while blacklisted')
+            st.stop()
 
-        st.title("Seller Dashboard")
 
-        # --- Helper Functions (Specific to Seller Role) ---
-
+        # --- Helper Functions (Scoped to Seller) ---
         @st.cache_data(ttl=60) # Cache seller products for 1 minute
         def get_seller_products(_seller_id):
             """Fetches products listed by a specific seller."""
@@ -727,18 +925,13 @@ else:
             conn = None
             try:
                 conn = get_db_connection()
-                if not conn: raise Exception("DB connection failed")
+                if not conn: return products # Return empty if no connection
                 with conn.cursor(dictionary=True) as cursor:
-                    query = """
-                        SELECT id, name, price_cents, quantity, created_at
-                        FROM Product
-                        WHERE seller_id = %s
-                        ORDER BY created_at DESC
-                    """
-                    cursor.execute(query, (_seller_id,))
+                    # Assuming Product table has a seller_id column
+                    cursor.execute("SELECT id, name, description, price_cents, stock_quantity, created_at FROM Product WHERE seller_id = %s ORDER BY created_at DESC", (_seller_id,))
                     products = cursor.fetchall()
-            except Exception as e:
-                st.error(f"Error fetching seller products: {e}")
+            except mysql.connector.Error as err:
+                st.error(f"Error fetching seller products: {err}")
             finally:
                 if conn and conn.is_connected():
                     conn.close()
@@ -751,21 +944,23 @@ else:
             conn = None
             try:
                 conn = get_db_connection()
-                if not conn: raise Exception("DB connection failed")
+                if not conn: return transactions
                 with conn.cursor(dictionary=True) as cursor:
+                    # This query joins Order, Transaction, and Product to get details relevant to the seller
                     query = """
-                        SELECT t.id, p.name as product_name, u_buyer.email as buyer_email,
-                               t.amount_cents, t.timestamp
+                        SELECT t.id as transaction_id, o.id as order_id, o.order_date, p.name as product_name, 
+                               t.quantity, t.price_at_transaction_cents, u.email as buyer_email
                         FROM Transaction t
+                        JOIN `Order` o ON t.order_id = o.id
                         JOIN Product p ON t.product_id = p.id
-                        JOIN User u_buyer ON t.buyer_id = u_buyer.id
-                        WHERE t.seller_id = %s
-                        ORDER BY t.timestamp DESC
+                        JOIN User u ON o.buyer_id = u.id
+                        WHERE p.seller_id = %s
+                        ORDER BY o.order_date DESC
                     """
                     cursor.execute(query, (_seller_id,))
                     transactions = cursor.fetchall()
-            except Exception as e:
-                st.error(f"Error fetching seller transactions: {e}")
+            except mysql.connector.Error as err:
+                st.error(f"Error fetching seller transactions: {err}")
             finally:
                 if conn and conn.is_connected():
                     conn.close()
@@ -778,222 +973,150 @@ else:
             conn = None
             try:
                 conn = get_db_connection()
-                if not conn: raise Exception("DB connection failed")
+                if not conn: return reviews
                 with conn.cursor(dictionary=True) as cursor:
                     query = """
-                        SELECT r.id, p.name as product_name, u_buyer.email as buyer_email,
-                               r.rating, r.text, r.created_at as review_date
+                        SELECT r.id as review_id, p.name as product_name, r.rating, r.text, r.created_at, u.email as buyer_email
                         FROM Review r
                         JOIN Product p ON r.product_id = p.id
-                        JOIN User u_buyer ON r.buyer_id = u_buyer.id
+                        JOIN User u ON r.buyer_id = u.id
                         WHERE p.seller_id = %s
                         ORDER BY r.created_at DESC
                     """
                     cursor.execute(query, (_seller_id,))
                     reviews = cursor.fetchall()
-            except Exception as e:
-                st.error(f"Error fetching seller reviews: {e}")
+            except mysql.connector.Error as err:
+                st.error(f"Error fetching seller reviews: {err}")
             finally:
                 if conn and conn.is_connected():
                     conn.close()
             return reviews
 
-        # --- Seller UI Tabs ---
-        tab1, tab2, tab3 = st.tabs(["Manage Products", "View Transactions", "View Reviews"])
+
+        # --- Seller Dashboard Tabs ---
+        tab1, tab2, tab3 = st.tabs(["Manage Products", "View Orders/Transactions", "View Reviews"])
 
         with tab1:
             st.header("Manage Your Products")
 
-            # Display Seller's Products
-            st.subheader("My Products")
+            # Display existing products
+            st.subheader("Your Listed Products")
             seller_products = get_seller_products(st.session_state.user_id)
             if seller_products:
-                df_products = pd.DataFrame(seller_products)
-                # Format price for display
-                df_products['price'] = df_products['price_cents'].apply(lambda x: f"₹{x / 100:.2f}")
-                # Format date
-                df_products['created_at'] = pd.to_datetime(df_products['created_at']).dt.strftime('%Y-%m-%d %H:%M')
-                # Select and reorder columns for display
-                st.dataframe(df_products[['id', 'name', 'price', 'quantity', 'created_at']])
+                st.dataframe(pd.DataFrame(seller_products), use_container_width=True)
             else:
-                st.info("You haven't added any products yet.")
+                st.info("You have not listed any products yet.")
 
             st.divider()
-
-            # Add New Product Form
+            # Form to add a new product
             st.subheader("Add New Product")
             with st.form("add_product_form", clear_on_submit=True):
-                product_name = st.text_input("Product Name*")
-                product_desc = st.text_area("Description")
-                product_price = st.number_input("Price (₹)*", min_value=0.01, format="%.2f", step=0.50)
-                product_quantity = st.number_input("Quantity*", min_value=0, step=1)
-                submitted = st.form_submit_button("Add Product")
+                name = st.text_input("Product Name")
+                description = st.text_area("Product Description")
+                price_dollars = st.number_input("Price (USD)", min_value=0.01, step=0.01, format="%.2f")
+                stock_quantity = st.number_input("Stock Quantity", min_value=0, step=1)
+                submitted_add_product = st.form_submit_button("Add Product")
 
-                if submitted:
-                    add_prod_conn = None
-                    try:
-                        add_prod_conn = get_db_connection()
-                        if not add_prod_conn: raise Exception("DB connection failed")
-
-                        # Re-check blacklist before action
-                        if check_blacklist(add_prod_conn, st.session_state.user_id):
-                            st.error("Action failed: Your account is blacklisted.")
-                        elif not product_name:
-                            st.warning("Product Name is required.")
-                        elif product_price <= 0:
-                             st.warning("Price must be positive.")
-                        elif product_quantity < 0:
-                             st.warning("Quantity cannot be negative.")
-                        else:
-                            # Convert price to cents
-                            price_cents = int(product_price * 100)
-
-                            cursor = add_prod_conn.cursor()
-                            insert_sql = """
-                                INSERT INTO Product (seller_id, name, description, price_cents, quantity, created_at)
-                                VALUES (%s, %s, %s, %s, %s, %s)
-                            """
-                            # New products might need admin approval depending on rules
-                            values = (st.session_state.user_id, product_name, product_desc, price_cents, product_quantity, datetime.now())
-                            cursor.execute(insert_sql, values)
-                            product_id = cursor.lastrowid
-                            add_prod_conn.commit()
-                            cursor.close()
-
-                            # Log activity
-                            log_activity(add_prod_conn, st.session_state.user_id, 'add_product', f'Product ID: {product_id}, Name: {product_name}')
-
-                            st.success(f"Product '{product_name}' added successfully (ID: {product_id})!")
-                            st.cache_data.clear() # Clear cache to show new product
-                            st.rerun() # Rerun to update the product list
-
-                    except mysql.connector.Error as err:
-                        if add_prod_conn: add_prod_conn.rollback()
-                        st.error(f"Database error adding product: {err}")
-                    except Exception as e:
-                        st.error(f"Error adding product: {e}")
-                    finally:
-                        if add_prod_conn and add_prod_conn.is_connected():
-                            add_prod_conn.close()
-
-            # Placeholder for Update/Delete functionality (more complex UI needed)
-            # st.subheader("Update/Delete Product")
-            # st.info("Update/Delete functionality coming soon.")
-
-
+                if submitted_add_product:
+                    if not name or not description or price_dollars <= 0:
+                        st.warning("Please fill in all product details correctly.")
+                    else:
+                        add_prod_conn = None
+                        try:
+                            add_prod_conn = get_db_connection()
+                            if not add_prod_conn: raise Exception("DB connection failed")
+                            
+                            # Re-check blacklist before action
+                            if check_blacklist(add_prod_conn, st.session_state.user_id):
+                                st.error("Action failed: Your account is blacklisted.")
+                            else:
+                                price_cents = int(price_dollars * 100)
+                                cursor = add_prod_conn.cursor()
+                                sql = "INSERT INTO Product (seller_id, name, description, price_cents, stock_quantity) VALUES (%s, %s, %s, %s, %s)"
+                                values = (st.session_state.user_id, name, description, price_cents, stock_quantity)
+                                cursor.execute(sql, values)
+                                product_id = cursor.lastrowid
+                                add_prod_conn.commit()
+                                cursor.close()
+                                log_activity(add_prod_conn, st.session_state.user_id, 'add_product', f'Product ID: {product_id}, Name: {name}')
+                                st.success(f"Product '{name}' added successfully!")
+                                st.cache_data.clear() # Clear product cache
+                                st.rerun() # Rerun to update product list
+                        except mysql.connector.Error as err:
+                            if add_prod_conn: add_prod_conn.rollback()
+                            st.error(f"Database error adding product: {err}")
+                        except Exception as e:
+                            st.error(f"Error adding product: {e}")
+                        finally:
+                            if add_prod_conn and add_prod_conn.is_connected():
+                                add_prod_conn.close()
         with tab2:
-            st.header("View Transactions")
+            st.header("Your Orders and Transactions")
             seller_transactions = get_seller_transactions(st.session_state.user_id)
             if seller_transactions:
+                # Convert price to dollars for display
                 df_transactions = pd.DataFrame(seller_transactions)
-                # Format amount
-                df_transactions['amount'] = df_transactions['amount_cents'].apply(lambda x: f"₹{x / 100:.2f}") # Use correct column name
-                # Format date (using timestamp from query) and rename for display
-                df_transactions['transaction_date'] = pd.to_datetime(df_transactions['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
-                # Select and reorder columns (removed quantity, status)
-                st.dataframe(df_transactions[['id', 'product_name', 'buyer_email', 'amount', 'transaction_date']])
+                df_transactions['price_at_transaction_dollars'] = df_transactions['price_at_transaction_cents'] / 100
+                st.dataframe(df_transactions[['transaction_id', 'order_id', 'order_date', 'product_name', 'quantity', 'price_at_transaction_dollars', 'buyer_email']], use_container_width=True)
             else:
                 st.info("No transactions found for your products yet.")
 
-
         with tab3:
-            st.header("View Product Reviews")
-            print(f"DEBUG: Fetching reviews for seller_id: {st.session_state.user_id}") # DEBUG PRINT
-            seller_reviews = get_seller_reviews(st.session_state.user_id)
-            print(f"DEBUG: Fetched reviews: {seller_reviews}") # DEBUG PRINT
-            if seller_reviews:
-                df_reviews = pd.DataFrame(seller_reviews)
-                 # Format date
-                df_reviews['review_date'] = pd.to_datetime(df_reviews['review_date']).dt.strftime('%Y-%m-%d %H:%M:%S')
-                # Select and reorder columns
-                st.dataframe(df_reviews[['id', 'product_name', 'buyer_email', 'rating', 'text', 'review_date']])
+            st.header("Reviews for Your Products")
+            seller_reviews_data = get_seller_reviews(st.session_state.user_id)
+            if seller_reviews_data:
+                st.dataframe(pd.DataFrame(seller_reviews_data), use_container_width=True)
             else:
                 st.info("No reviews found for your products yet.")
+
+
     elif st.session_state.role == 'buyer':
         # --- Buyer Dashboard ---
-        conn = get_db_connection()
+        st.title("Welcome, Buyer!")
+        conn = get_db_connection() # General connection for this dashboard section
         if not conn:
-            st.error("Database connection failed. Please try again later.")
-            st.stop()
+            st.error("Database connection failed. Cannot load Buyer Dashboard.")
+            st.stop() # Stop execution if no DB connection
 
-        # 1. Blacklist Check (at the very beginning)
-        is_blacklisted = False
+        is_blacklisted_buyer = False
         try:
-            is_blacklisted = check_blacklist(conn, st.session_state.user_id)
+            is_blacklisted_buyer = check_blacklist(conn, st.session_state.user_id)
         except mysql.connector.Error as err:
-            st.error(f"Error checking blacklist status: {err}")
-            # Decide if we should stop execution or allow limited access
-            # For now, let's stop if we can't verify blacklist status
-            if conn and conn.is_connected():
-                conn.close()
+            st.error(f"Error checking buyer blacklist status: {err}")
+            st.stop()
+        # No finally block to close conn here, as it's used by helper functions within tabs.
+        # It will be closed at the end of the buyer dashboard section.
+
+        if is_blacklisted_buyer:
+            st.error("Your buyer account is currently blacklisted. Access denied.")
+            log_activity(conn, st.session_state.user_id, 'buyer_blacklist_block', 'Buyer attempted access while blacklisted')
+            if conn and conn.is_connected(): conn.close() # Close connection before stopping
             st.stop()
 
-        if is_blacklisted:
-            st.error("You are currently blacklisted and cannot perform actions.")
-            if conn and conn.is_connected():
-                conn.close()
-            st.stop()
+        # --- Helper Functions (Scoped to Buyer) ---
         def get_user_email(conn_db, user_id_to_fetch):
             """Fetches a user's email by their ID."""
-            cursor_email = None
+            email = "N/A"
+            cursor = None
             try:
-                cursor_email = conn_db.cursor(dictionary=True)
-                cursor_email.execute("SELECT email FROM User WHERE id = %s", (user_id_to_fetch,))
-                user_data_email = cursor_email.fetchone()
-                if user_data_email:
-                    return user_data_email['email']
-            except mysql.connector.Error as err_email:
-                st.error(f"Error fetching user email: {err_email}")
-            finally:
-                if cursor_email:
-                    cursor_email.close()
-            return None
-
-        buyer_email_str = get_user_email(conn, st.session_state.user_id)
-        buyer_dashboard_title = "Buyer Dashboard" # Default title
-        if buyer_email_str and buyer_email_str.startswith('buyer') and '@example.com' in buyer_email_str:
-            try:
-                # Extracts 'N' from 'buyerN@example.com'
-                buyer_number_str = buyer_email_str.replace('buyer', '').split('@')[0]
-                if buyer_number_str.isdigit():
-                    buyer_dashboard_title = f"Buyer {buyer_number_str} Dashboard"
-            except Exception:
-                pass # Stick to default title if parsing fails
-        
-        st.title(buyer_dashboard_title)
-        # Close connection if only used for blacklist check initially
-        # However, we'll likely need it again, so keep it open for now,
-        # but ensure it's closed properly in all execution paths.
-
-        # 2. Initialize Cart
-        if 'cart' not in st.session_state:
-            st.session_state.cart = {} # {product_id: quantity}
-
-        # --- Helper Functions (Specific to Buyer Role) ---
-
-        @st.cache_data(ttl=60) # Cache for 1 minute
-        def get_products(_conn):
-            """Fetches available products from the database."""
-            products = []
-            try:
-                with _conn.cursor(dictionary=True) as cursor:
-                    # Join with User table to get seller email
-                    query = """
-                        SELECT p.id, p.name, p.description, p.price_cents, p.quantity, p.seller_id, u.email as seller_email
-                        FROM Product p
-                        JOIN User u ON p.seller_id = u.id
-                        WHERE p.quantity > 0
-                    """
-                    cursor.execute(query)
-                    products = cursor.fetchall()
+                cursor = conn_db.cursor(dictionary=True)
+                cursor.execute("SELECT email FROM User WHERE id = %s", (user_id_to_fetch,))
+                result = cursor.fetchone()
+                if result:
+                    email = result['email']
             except mysql.connector.Error as err:
-                st.error(f"Error fetching products: {err}")
-            return products
+                st.warning(f"Could not fetch email for user {user_id_to_fetch}: {err}")
+            finally:
+                if cursor:
+                    cursor.close()
+            return email
 
+        # --- Wallet Functions (copied from Admin for now, consider moving to utils if truly shared) ---
         @st.cache_data(ttl=30) # Cache balance for 30 seconds
         def get_wallet_balance(_conn, user_id):
             """Queries Wallet table, returns balance_cents."""
             balance = 0
+            cursor = None
             try:
                 with _conn.cursor(dictionary=True) as cursor:
                     cursor.execute("SELECT balance_cents FROM Wallet WHERE user_id = %s", (user_id,))
@@ -1002,414 +1125,423 @@ else:
                         balance = result['balance_cents']
             except mysql.connector.Error as err:
                 st.error(f"Error fetching wallet balance: {err}")
-                # Handle error appropriately, maybe return None or raise exception
             return balance
 
         def update_wallet_balance(_conn, user_id, amount_change_cents):
             """Updates Wallet set balance_cents = balance_cents + amount_change_cents."""
+            cursor = None
             try:
-                with _conn.cursor() as cursor:
+                with _conn.cursor() as cursor: # Use 'with' for cursor management
                     cursor.execute(
                         "UPDATE Wallet SET balance_cents = balance_cents + %s WHERE user_id = %s",
                         (amount_change_cents, user_id)
                     )
-                # No commit here, assuming it's part of a larger transaction
+                    if cursor.rowcount == 0: # Wallet might not exist
+                        cursor.execute("INSERT INTO Wallet (user_id, balance_cents) VALUES (%s, %s)", (user_id, amount_change_cents))
+                # No commit here, handled by caller
                 return True
             except mysql.connector.Error as err:
                 st.error(f"Error updating wallet balance: {err}")
                 return False
 
+
+        # Check and display wallet balance (moved outside tabs for general visibility)
+        wallet_conn_buyer = None
+        try:
+            wallet_conn_buyer = get_db_connection()
+            if wallet_conn_buyer:
+                balance_cents = get_wallet_balance(wallet_conn_buyer, st.session_state.user_id)
+                st.sidebar.metric("Your Wallet Balance", f"${balance_cents / 100:.2f}")
+            else:
+                st.sidebar.warning("Could not fetch wallet balance.")
+        except Exception as e_wallet:
+            st.sidebar.error(f"Error fetching wallet: {e_wallet}")
+        finally:
+            if wallet_conn_buyer and wallet_conn_buyer.is_connected():
+                wallet_conn_buyer.close()
+
+
+        # --- Buyer Dashboard Tabs ---
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["Products", "Cart", "My Orders", "Submit Review", "Customer Support"])
+
+        # --- Products Tab ---
+        @st.cache_data(ttl=60) # Cache for 1 minute
+        def get_products(_conn):
+            """Fetches available products from the database."""
+            products = []
+            cursor = None # Define cursor outside try for broader scope in finally
+            try:
+                # Ensure connection is active before creating cursor
+                if not _conn or not _conn.is_connected():
+                    # Attempt to reconnect or get a new connection if necessary
+                    # For simplicity, we'll assume _conn is valid or this function is called with a valid one.
+                    # If not, an error will be raised by cursor creation.
+                    st.warning("Product fetch: DB connection lost or invalid.")
+                    return products # Return empty list
+
+                with _conn.cursor(dictionary=True) as cursor:
+                    # Fetch products that have stock
+                    cursor.execute("SELECT id, name, description, price_cents, stock_quantity, seller_id FROM Product WHERE stock_quantity > 0 ORDER BY created_at DESC")
+                    products_raw = cursor.fetchall()
+                    # Get seller emails (can be slow if many products, consider optimizing)
+                    # This part is removed to avoid N+1 query issues within a cached function.
+                    # Seller info can be fetched on demand or joined differently if needed.
+                    products = products_raw # Directly use raw products
+            except mysql.connector.Error as err:
+                st.error(f"Error fetching products: {err}")
+            # Removed finally block for cursor close as 'with' statement handles it
+            # Removed finally block for _conn.close() as _conn is passed in and managed by caller
+            return products
+
+        # --- Order History Function ---
         @st.cache_data(ttl=60)
         def get_buyer_orders(_conn, user_id):
             """Fetches orders from Order table for the user."""
             orders = []
+            cursor = None
             try:
                 with _conn.cursor(dictionary=True) as cursor:
-                    # Join with Payment to show payment status/details if needed
-                    query = """
-                        SELECT o.id, o.created_at as order_date, o.total_amount_cents, p.timestamp as payment_timestamp
-                        FROM `Order` o
-                        LEFT JOIN Payment p ON o.payment_id = p.id
-                        WHERE o.user_id = %s
-                        ORDER BY o.created_at DESC
-                    """
-                    cursor.execute(query, (user_id,))
+                    cursor.execute("SELECT id, order_date, total_amount_cents, status FROM `Order` WHERE buyer_id = %s ORDER BY order_date DESC", (user_id,))
                     orders = cursor.fetchall()
             except mysql.connector.Error as err:
                 st.error(f"Error fetching orders: {err}")
             return orders
 
+        # --- Function to get products for review ---
         @st.cache_data(ttl=60)
         def get_order_products_for_review(_conn, user_id):
             """Fetches products from transactions linked to the user's completed orders
-               for which a review doesn't already exist."""
+               that have not yet been reviewed by this user."""
             items = []
+            cursor = None
             try:
                 with _conn.cursor(dictionary=True) as cursor:
-                    # Find transactions for the user's orders where a review doesn't exist
-                    # Assumes Payment status 'completed' means order is reviewable
+                    # Select products from transactions where the order is 'completed'
+                    # and for which no review exists from this buyer for this product.
+                    # This assumes a simple "no review yet" check.
+                    # A more complex system might track review per transaction_item_id if multiple of same product in different orders.
                     query = """
-                        SELECT t.id as transaction_id, t.product_id, p.name as product_name # Removed o.id, o.created_at
+                        SELECT DISTINCT t.product_id, p.name as product_name, t.id as transaction_id
                         FROM Transaction t
                         JOIN Product p ON t.product_id = p.id
-                        # JOIN `Order` o ON t.order_id = o.id # REMOVED INVALID JOIN
-                        # JOIN Payment pay ON o.payment_id = pay.id # REMOVED INVALID JOIN
-                        LEFT JOIN Review r ON t.product_id = r.product_id AND t.buyer_id = r.buyer_id # Simplified join condition, removed o.id
-                        WHERE t.buyer_id = %s
-                          # AND pay.status = 'completed' # Removed condition
-                          AND r.id IS NULL # Keep check for existing review based on product/buyer
-                        ORDER BY t.timestamp DESC, p.name ASC # Order by transaction time instead
+                        JOIN `Order` o ON t.order_id = o.id
+                        WHERE o.buyer_id = %s AND o.status = 'completed' 
+                        AND NOT EXISTS (
+                            SELECT 1 FROM Review r 
+                            WHERE r.buyer_id = o.buyer_id AND r.product_id = t.product_id
+                        )
+                        ORDER BY p.name;
                     """
+                    # The subquery for NOT EXISTS checks if a review from this buyer for this product already exists.
+                    # This means a product can only be reviewed once by a buyer, regardless of how many times it was ordered.
+                    # If review per transaction is needed, the schema and query would be different.
                     cursor.execute(query, (user_id,))
                     items = cursor.fetchall()
             except mysql.connector.Error as err:
-                st.error(f"Error fetching items for review: {err}")
+                st.error(f"Error fetching products for review: {err}")
             return items
 
         def get_product_details(_conn, product_id):
              """Fetches details for a single product."""
+             product = None
              try:
                  with _conn.cursor(dictionary=True) as cursor:
-                     cursor.execute("SELECT name, price_cents, quantity, seller_id FROM Product WHERE id = %s", (product_id,))
-                     return cursor.fetchone()
+                     cursor.execute("SELECT name, description, price_cents FROM Product WHERE id = %s", (product_id,))
+                     product = cursor.fetchone()
              except mysql.connector.Error as err:
                  st.error(f"Error fetching product details: {err}")
-                 return None
+             return product
 
-        # --- Checkout Logic ---
         def handle_checkout():
             checkout_conn = None # Use a separate connection variable for clarity
             try:
                 checkout_conn = get_db_connection()
                 if not checkout_conn:
-                    st.error("Checkout failed: Could not connect to database.")
+                    st.error("Checkout failed: Could not connect to the database.")
                     return
 
-                # Re-check blacklist just before transaction
+                # Re-check blacklist before proceeding with checkout
                 if check_blacklist(checkout_conn, st.session_state.user_id):
                     st.error("Checkout failed: Your account is blacklisted.")
                     return
 
-                if not st.session_state.cart:
+                cart_items = st.session_state.get('cart', {})
+                if not cart_items:
                     st.warning("Your cart is empty.")
                     return
 
                 total_amount_cents = 0
-                product_details_cache = {} # Cache details to avoid multiple queries
+                product_details_for_order = []
 
-                # Calculate total and fetch product details
-                for product_id, quantity in st.session_state.cart.items():
-                    details = get_product_details(checkout_conn, product_id)
-                    if not details:
-                        st.error(f"Checkout failed: Could not retrieve details for product ID {product_id}.")
+                cursor = checkout_conn.cursor(dictionary=True) # Use one cursor for multiple reads
+
+                # 1. Validate cart items and calculate total
+                for product_id, quantity in cart_items.items():
+                    cursor.execute("SELECT name, price_cents, stock_quantity FROM Product WHERE id = %s", (product_id,))
+                    product = cursor.fetchone()
+                    if not product:
+                        st.error(f"Product ID {product_id} not found. Please remove from cart.")
                         return
-                    if details['quantity'] < quantity:
-                         st.error(f"Checkout failed: Not enough stock for {details['name']} (requested {quantity}, available {details['quantity']}).")
-                         return
-                    product_details_cache[product_id] = details
-                    total_amount_cents += details['price_cents'] * quantity
-
-                # Check buyer's balance
-                buyer_balance = get_wallet_balance(checkout_conn, st.session_state.user_id)
-                if buyer_balance < total_amount_cents:
-                    st.error(f"Insufficient funds. Your balance: ₹{buyer_balance / 100:.2f}, Required: ₹{total_amount_cents / 100:.2f}")
+                    if product['stock_quantity'] < quantity:
+                        st.error(f"Not enough stock for {product['name']}. Available: {product['stock_quantity']}.")
+                        return
+                    total_amount_cents += product['price_cents'] * quantity
+                    product_details_for_order.append({
+                        'id': product_id,
+                        'price_at_transaction_cents': product['price_cents'],
+                        'quantity': quantity,
+                        'name': product['name'] # For logging/display
+                    })
+                
+                # 2. Check wallet balance
+                cursor.execute("SELECT balance_cents FROM Wallet WHERE user_id = %s", (st.session_state.user_id,))
+                wallet = cursor.fetchone()
+                if not wallet or wallet['balance_cents'] < total_amount_cents:
+                    st.error("Insufficient wallet balance for this order.")
+                    # Optionally, guide user to add funds if that feature exists
                     return
 
-                # --- Database Transaction ---
-                # Manually control autocommit for this block
-                original_autocommit_state = checkout_conn.autocommit
-                checkout_conn.autocommit = False
-                order_id = None
-                payment_id = None
-                cursor = None # Define cursor outside try to close in finally
-
+                # --- Start Transaction ---
+                checkout_conn.start_transaction()
+                
                 try:
-                    cursor = checkout_conn.cursor(dictionary=True) # Use one cursor for the transaction
-
-                    # 1. Create Order
-                    order_sql = "INSERT INTO `Order` (user_id, created_at, total_amount_cents) VALUES (%s, %s, %s)"
-                    order_values = (st.session_state.user_id, datetime.now(), total_amount_cents)
+                    # 3. Create Order
+                    order_sql = "INSERT INTO `Order` (buyer_id, order_date, total_amount_cents, status) VALUES (%s, %s, %s, %s)"
+                    order_values = (st.session_state.user_id, datetime.now(), total_amount_cents, 'completed') # Assuming 'completed' for simplicity
                     cursor.execute(order_sql, order_values)
                     order_id = cursor.lastrowid
-                    if not order_id: raise Exception("Failed to create order record.")
 
-                    # 2. Create Payment record
-                    payment_sql = "INSERT INTO Payment (order_id, amount_cents, timestamp) VALUES (%s, %s, %s)"
-                    payment_values = (order_id, total_amount_cents, datetime.now())
-                    cursor.execute(payment_sql, payment_values)
-                    payment_id = cursor.lastrowid
-                    if not payment_id: raise Exception("Failed to create payment record.")
-
-                    # 3. Update Order with Payment ID
-                    update_order_sql = "UPDATE `Order` SET payment_id = %s WHERE id = %s"
-                    cursor.execute(update_order_sql, (payment_id, order_id))
-                    if cursor.rowcount == 0: raise Exception("Failed to link payment to order.")
-
-                    # 4. Process each item in the cart
-                    for product_id, quantity in st.session_state.cart.items():
-                        details = product_details_cache[product_id] # Use cached details
-                        price_cents = details['price_cents']
-                        seller_id = details['seller_id']
-                        item_total_cents = price_cents * quantity
-
-                        # 4a. Double-check Product Quantity (lock might be better in high concurrency)
-                        cursor.execute("SELECT quantity FROM Product WHERE id = %s FOR UPDATE", (product_id,)) # Lock row
-                        current_quantity = cursor.fetchone()['quantity']
-                        if current_quantity < quantity:
-                            raise Exception(f"Stock level changed for product ID {product_id}. Checkout aborted.")
-
-                        # 4b. Create Transaction record
-                        trans_sql = """
-                            INSERT INTO Transaction (buyer_id, seller_id, product_id, amount_cents, timestamp)
-                            VALUES (%s, %s, %s, %s, %s)
-                        """
-                        trans_values = (st.session_state.user_id, seller_id, product_id, item_total_cents, datetime.now())
+                    # 4. Create Transactions and Update Stock
+                    for item in product_details_for_order:
+                        trans_sql = "INSERT INTO Transaction (order_id, product_id, quantity, price_at_transaction_cents) VALUES (%s, %s, %s, %s)"
+                        trans_values = (order_id, item['id'], item['quantity'], item['price_at_transaction_cents'])
                         cursor.execute(trans_sql, trans_values)
-                        transaction_id = cursor.lastrowid
-                        if not transaction_id: raise Exception(f"Failed to create transaction record for product ID {product_id}.")
 
-                        # 4c. Run Fraud Checks for the transaction
-                        fraud_check_payload = {
-                            'transaction_id': transaction_id,
-                            'order_id': order_id,
-                            'buyer_id': st.session_state.user_id,
-                            'seller_id': seller_id,
-                            'product_id': product_id,
-                            'quantity': quantity,
-                            'amount_cents': item_total_cents
-                        }
-                        run_fraud_checks(checkout_conn, 'new_transaction', fraud_check_payload)
-                        # Check results of fraud checks if they return actionable flags
+                        # Update stock
+                        stock_sql = "UPDATE Product SET stock_quantity = stock_quantity - %s WHERE id = %s"
+                        cursor.execute(stock_sql, (item['quantity'], item['id']))
+                    
+                    # 5. Update Wallet Balance
+                    wallet_update_sql = "UPDATE Wallet SET balance_cents = balance_cents - %s WHERE user_id = %s"
+                    cursor.execute(wallet_update_sql, (total_amount_cents, st.session_state.user_id))
 
-                        # 4d. Update Product Quantity
-                        update_prod_sql = "UPDATE Product SET quantity = quantity - %s WHERE id = %s"
-                        cursor.execute(update_prod_sql, (quantity, product_id))
-                        if cursor.rowcount == 0: raise Exception(f"Failed to update quantity for product ID {product_id}.")
-
-                        # 4e. Update Seller Wallet (Optional: could be done later/batch)
-                        if not update_wallet_balance(checkout_conn, seller_id, item_total_cents):
-                             raise Exception(f"Failed to update seller {seller_id} wallet.")
-
-
-                    # 5. Update Buyer Wallet
-                    if not update_wallet_balance(checkout_conn, st.session_state.user_id, -total_amount_cents):
-                        raise Exception("Failed to update buyer wallet.")
-
-                    # 6. Update Payment Status to 'completed' (Schema does not have status for Payment)
-                    # update_payment_sql = "UPDATE Payment SET status = %s WHERE id = %s"
-                    # cursor.execute(update_payment_sql, ('completed', payment_id))
-                    # if cursor.rowcount == 0: raise Exception("Failed to update payment status.")
-
-                     # 7. Update Order Status to 'completed' (Schema does not have status for Order)
-                    # update_order_status_sql = "UPDATE `Order` SET status = %s WHERE id = %s"
-                    # cursor.execute(update_order_status_sql, ('completed', order_id))
-                    # if cursor.rowcount == 0: raise Exception("Failed to update order status.")
-
-
-                    # --- If all steps successful ---
                     checkout_conn.commit()
-                    # Log successful checkout (before cursor close, after commit)
-                    log_activity(checkout_conn, st.session_state.user_id, 'checkout_success', f'Order ID: {order_id}, Amount: {total_amount_cents}')
+                    # --- Transaction End ---
+                    
+                    # Log successful checkout activity
+                    log_activity(checkout_conn, st.session_state.user_id, 'checkout_success', f"Order ID: {order_id}, Total: {total_amount_cents/100:.2f}")
 
-                    # Clear the cart
-                    st.session_state.cart = {}
+                    st.success(f"Checkout successful! Your order ID is {order_id}.")
+                    st.session_state.cart = {} # Clear cart
+                    # ANOMALY AND BLACKLIST CHECKS START
+                    db_conn_anomaly_check = None
+                    try:
+                        db_conn_anomaly_check = get_db_connection()
+                        if db_conn_anomaly_check and st.session_state.get('user_id') and st.session_state.get('role'):
+                            current_user_id = st.session_state.user_id # Capture before potential deletion
+                            current_user_role = st.session_state.role # Capture before potential deletion
+                            run_all_user_anomaly_checks_and_log(db_conn_anomaly_check, current_user_id, current_user_role)
+                            blacklist_result = check_and_blacklist_user_if_needed(db_conn_anomaly_check, current_user_id)
+                            if blacklist_result.get('blacklisted'):
+                                st.error("YOU ARE BLACKLISTED FOR ATTEMPTING TO FRAUD!")
+                                # Clear session state for logout, preserving blacklist message flag
+                                keys_to_del_on_blacklist_action = [k for k in st.session_state.keys() if k not in ['show_blacklisted_message_duration']]
+                                for k_del in keys_to_del_on_blacklist_action:
+                                    del st.session_state[k_del]
+                                st.session_state.logged_in = False
+                                st.session_state.user_id = None # Explicitly clear
+                                st.session_state.role = None # Explicitly clear
+                                st.session_state.show_blacklisted_message_duration = 5
+                                st.rerun()
+                    except mysql.connector.Error as e_anomaly:
+                        st.warning(f"Database error during post-action anomaly/blacklist check: {e_anomaly}")
+                    except Exception as e_generic_anomaly:
+                        st.warning(f"Unexpected error during post-action anomaly/blacklist check: {e_generic_anomaly}")
+                    finally:
+                        if db_conn_anomaly_check and db_conn_anomaly_check.is_connected():
+                            db_conn_anomaly_check.close()
+                    # ANOMALY AND BLACKLIST CHECKS END
+                    st.cache_data.clear() # Clear relevant caches (products, orders, wallet)
+                    st.rerun() # Rerun to reflect changes
 
-                    st.success(f"Order placed successfully! Order ID: {order_id}")
-                    st.balloons()
-                    st.cache_data.clear() # Clear cache to ensure order list updates
-                    st.rerun() # Rerun to clear cart display and update orders
+                except mysql.connector.Error as err_transact:
+                    if checkout_conn: checkout_conn.rollback()
+                    st.error(f"Checkout failed during transaction: {err_transact}")
+                    log_activity(checkout_conn, st.session_state.user_id, 'checkout_failure_db', str(err_transact))
 
-                except Exception as e:
-                    checkout_conn.rollback()
-                    st.error(f"Checkout failed: {e}")
-                    # Log failed checkout attempt (before cursor close, after rollback)
-                    log_activity(checkout_conn, st.session_state.user_id, 'checkout_failed', f'Error: {str(e)}')
-                finally:
-                    if cursor: # Removed 'not cursor.closed' check
-                        cursor.close()
-                    checkout_conn.autocommit = original_autocommit_state # Restore autocommit
-
-            except mysql.connector.Error as db_err:
-                 st.error(f"Database error during checkout: {db_err}")
-                 # Attempt to log DB error if possible
-                 if checkout_conn:
-                     try:
-                         log_activity(checkout_conn, st.session_state.user_id, 'checkout_failed', f'DB Error: {str(db_err)}')
-                         if checkout_conn.is_connected() and not original_autocommit_state: # If we changed autocommit, try to restore
-                             checkout_conn.autocommit = original_autocommit_state
-                     except: pass # Avoid error loops
-            finally:
-                # Ensure connection is closed and autocommit is restored if changed
+                finally: # This finally is for the inner try (transaction block)
+                    if cursor: cursor.close() # Close cursor used for checkout steps
+            
+            except mysql.connector.Error as err_main: # Error in initial connection or pre-transaction checks
+                st.error(f"Checkout failed: {err_main}")
+                log_activity(None, st.session_state.user_id, 'checkout_failure_setup', str(err_main)) # conn might be None
+            except Exception as e_main: # Other unexpected errors
+                st.error(f"An unexpected error occurred during checkout: {e_main}")
+                log_activity(None, st.session_state.user_id, 'checkout_failure_unexpected', str(e_main))
+            finally: # This finally is for the outer try (handle_checkout function)
                 if checkout_conn and checkout_conn.is_connected():
-                    if hasattr(locals(), 'original_autocommit_state') and checkout_conn.autocommit != original_autocommit_state:
-                        try:
-                            checkout_conn.autocommit = original_autocommit_state
-                        except: pass # Best effort
                     checkout_conn.close()
 
 
-        # --- Main Buyer UI ---
-        # st.title("Buyer Dashboard")
-
-        # Display Wallet Balance
-        buyer_conn_wallet = get_db_connection()
-        if buyer_conn_wallet:
-            current_balance_cents = get_wallet_balance(buyer_conn_wallet, st.session_state.user_id)
-            st.metric("My Wallet Balance", f"₹{current_balance_cents / 100:.2f}")
-            if buyer_conn_wallet.is_connected():
-                buyer_conn_wallet.close()
-        else:
-            st.warning("Could not fetch wallet balance.")
-
-
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "Browse Products", "View Cart", "My Orders", "Submit Review", "Customer Support"
-        ])
-
-        with tab1:
-            st.header("Browse Products")
-            products = get_products(conn) # Use the main connection
-
-            if not products:
-                st.info("No products currently available.")
-            else:
-                # Display products - using columns for better layout
+        with tab1: # Products Tab
+            st.header("Available Products")
+            # Use the main connection 'conn' established for the buyer dashboard
+            products = get_products(conn)
+            if products:
+                # Create columns for product display
                 cols = st.columns(3) # Adjust number of columns as needed
-                col_idx = 0
-                for product in products:
-                    with cols[col_idx % len(cols)]:
+                for idx, product in enumerate(products):
+                    with cols[idx % len(cols)]:
                         with st.container(border=True):
                             st.subheader(product['name'])
-                            st.caption(f"Seller: {product['seller_email']}")
-                            st.write(product.get('description', 'No description available.'))
-                            st.metric(label="Price", value=f"₹{product['price_cents'] / 100:.2f}")
-                            st.metric(label="Available Quantity", value=product['quantity'])
+                            st.caption(f"Seller ID: {product['seller_id']}") # Display seller ID
+                            st.write(product['description'])
+                            st.write(f"Price: ${product['price_cents'] / 100:.2f}")
+                            st.write(f"Stock: {product['stock_quantity']}")
 
-                            add_button_key = f"add_{product['id']}"
-                            if st.button(f"Add to Cart", key=add_button_key):
+                            quantity_to_add = st.number_input(f"Quantity##{product['id']}", min_value=1, max_value=product['stock_quantity'], value=1, step=1, key=f"qty_{product['id']}")
+                            if st.button("Add to Cart", key=f"add_{product['id']}"):
                                 add_conn = None # Connection for this specific action
                                 try:
                                     add_conn = get_db_connection()
-                                    if not add_conn: raise Exception("DB connection failed")
+                                    if not add_conn: raise Exception("DB connection failed for add to cart")
 
-                                    # Re-check blacklist
+                                    # Re-check blacklist before action
                                     if check_blacklist(add_conn, st.session_state.user_id):
                                         st.error("Action failed: Your account is blacklisted.")
                                     else:
-                                        # Get current product details (especially quantity)
-                                        prod_details = get_product_details(add_conn, product['id'])
-                                        if prod_details and prod_details['quantity'] > 0:
-                                            # Add/increment product in cart
-                                            current_cart_qty = st.session_state.cart.get(product['id'], 0)
-                                            if current_cart_qty < prod_details['quantity']:
-                                                st.session_state.cart[product['id']] = current_cart_qty + 1
+                                        cart = st.session_state.get('cart', {})
+                                        cart[product['id']] = cart.get(product['id'], 0) + quantity_to_add
+                                        st.session_state.cart = cart
+                                        # Log activity for adding to cart
+                                        log_activity(add_conn, st.session_state.user_id, 'add_to_cart', f"Product ID: {product['id']}, Quantity: {quantity_to_add}")
+                                        st.cache_data.clear() # Clear product cache if needed, or specific cart cache
+                                        st.rerun() # Rerun to reflect cart changes
+                                        st.success(f"Added {quantity_to_add} of {product['name']} to cart.")
+                                        # ANOMALY AND BLACKLIST CHECKS START
+                                        db_conn_anomaly_check = None
+                                        try:
+                                            db_conn_anomaly_check = get_db_connection()
+                                            if db_conn_anomaly_check and st.session_state.get('user_id') and st.session_state.get('role'):
+                                                current_user_id = st.session_state.user_id # Capture before potential deletion
+                                                current_user_role = st.session_state.role # Capture before potential deletion
+                                                run_all_user_anomaly_checks_and_log(db_conn_anomaly_check, current_user_id, current_user_role)
+                                                blacklist_result = check_and_blacklist_user_if_needed(db_conn_anomaly_check, current_user_id)
+                                                if blacklist_result.get('blacklisted'):
+                                                    st.error("YOU ARE BLACKLISTED FOR ATTEMPTING TO FRAUD!")
+                                                    # Clear session state for logout, preserving blacklist message flag
+                                                    keys_to_del_on_blacklist_action = [k for k in st.session_state.keys() if k not in ['show_blacklisted_message_duration']]
+                                                    for k_del in keys_to_del_on_blacklist_action:
+                                                        del st.session_state[k_del]
+                                                    st.session_state.logged_in = False
+                                                    st.session_state.user_id = None # Explicitly clear
+                                                    st.session_state.role = None # Explicitly clear
+                                                    st.session_state.show_blacklisted_message_duration = 5
+                                                    st.rerun()
+                                        except mysql.connector.Error as e_anomaly:
+                                            st.warning(f"Database error during post-action anomaly/blacklist check: {e_anomaly}")
+                                        except Exception as e_generic_anomaly:
+                                            st.warning(f"Unexpected error during post-action anomaly/blacklist check: {e_generic_anomaly}")
+                                        finally:
+                                            if db_conn_anomaly_check and db_conn_anomaly_check.is_connected():
+                                                db_conn_anomaly_check.close()
+                                        # ANOMALY AND BLACKLIST CHECKS END
 
-                                                # Log activity
-                                                log_activity(add_conn, st.session_state.user_id, 'cart_add', f'Product ID: {product["id"]}')
-
-                                                # Run fraud check for cart action
-                                                run_fraud_checks(add_conn, 'cart_action', {'user_id': st.session_state.user_id, 'product_id': product['id'], 'action': 'add'})
-                                                # Note: check_cart_flapping needs implementation in fraud_detection.py
-
-                                                st.success(f"Added {product['name']} to cart.")
-                                                # No rerun needed here, cart updates implicitly
-                                            else:
-                                                 st.warning(f"Cannot add more {product['name']}. Max available quantity reached in cart.")
-                                        else:
-                                            st.error(f"Could not add {product['name']} to cart. Item might be out of stock.")
-                                            # Optionally remove from display if quantity hit 0? Requires rerun.
-
-                                except Exception as e:
-                                    st.error(f"Error adding to cart: {e}")
+                                except mysql.connector.Error as err_add_cart_db:
+                                    st.error(f"DB error adding to cart: {err_add_cart_db}")
+                                except Exception as err_add_cart:
+                                    st.error(f"Error adding to cart: {err_add_cart}")
                                 finally:
-                                     if add_conn and add_conn.is_connected():
-                                         add_conn.close()
-                    col_idx += 1
+                                    if add_conn and add_conn.is_connected():
+                                        add_conn.close()
+            else:
+                st.info("No products available at the moment.")
 
-
-        with tab2:
-            st.header("View Cart")
-            if not st.session_state.cart:
+        with tab2: # Cart Tab
+            st.header("Your Shopping Cart")
+            cart_items = st.session_state.get('cart', {})
+            if not cart_items:
                 st.info("Your cart is empty.")
             else:
                 cart_items_details = []
-                total_cart_amount_cents = 0
+                total_cart_value = 0
                 cart_conn = None
                 try:
                     cart_conn = get_db_connection()
-                    if not cart_conn: raise Exception("DB connection failed")
-
-                    for product_id, quantity in st.session_state.cart.items():
-                        details = get_product_details(cart_conn, product_id) # Fetch fresh details
-                        if details:
-                            item_total = details['price_cents'] * quantity
+                    if not cart_conn: raise Exception("DB connection failed for cart display")
+                    
+                    for product_id, quantity in cart_items.items():
+                        product_info = get_product_details(cart_conn, product_id) # Use existing connection
+                        if product_info:
+                            item_total = product_info['price_cents'] * quantity
                             cart_items_details.append({
                                 "Product ID": product_id,
-                                "Name": details['name'],
+                                "Name": product_info['name'],
                                 "Quantity": quantity,
-                                "Price per Item": f"₹{details['price_cents'] / 100:.2f}",
-                                "Total": f"₹{item_total / 100:.2f}",
-                                "_price_cents": details['price_cents'] # Keep numeric for calculation
+                                "Price per item": f"${product_info['price_cents'] / 100:.2f}",
+                                "Total": f"${item_total / 100:.2f}"
                             })
-                            total_cart_amount_cents += item_total
+                            total_cart_value += item_total
                         else:
-                            # Handle case where product details couldn't be fetched (e.g., removed)
-                            st.warning(f"Could not load details for product ID {product_id} in cart. It might have been removed.")
-                            # Optionally remove from cart here: del st.session_state.cart[product_id] and rerun
+                            # Product might have been removed or stock depleted
+                            st.warning(f"Product ID {product_id} details not found. It might be unavailable.")
+                            # Optionally, remove from cart here:
+                            # del st.session_state.cart[product_id]
+                            # st.rerun()
 
                     if cart_items_details:
-                        st.dataframe(pd.DataFrame(cart_items_details).drop(columns=['_price_cents'])) # Display nice table
-                        st.subheader(f"Total Cart Amount: ₹{total_cart_amount_cents / 100:.2f}")
+                        st.dataframe(pd.DataFrame(cart_items_details), use_container_width=True)
+                        st.subheader(f"Total Cart Value: ${total_cart_value / 100:.2f}")
 
-                        if st.button("Checkout"):
-                            handle_checkout() # Call the checkout function
+                        if st.button("Proceed to Checkout", key="checkout_button"):
+                            handle_checkout() # Call the checkout handler
+
+                        if st.button("Clear Cart", key="clear_cart_button"):
+                            st.session_state.cart = {}
+                            st.rerun()
                     else:
-                         st.info("Your cart is empty or contains unavailable items.")
+                        st.info("Your cart is empty or items became unavailable.") # If all items failed to load
 
-
-                except Exception as e:
-                    st.error(f"Error displaying cart: {e}")
+                except Exception as e_cart_display:
+                    st.error(f"Error displaying cart: {e_cart_display}")
                 finally:
                     if cart_conn and cart_conn.is_connected():
                         cart_conn.close()
 
-
-        with tab3:
+        with tab3: # My Orders Tab
             st.header("My Orders")
             orders_conn = None
             try:
                 orders_conn = get_db_connection()
-                if not orders_conn: raise Exception("DB connection failed")
-                buyer_orders = get_buyer_orders(orders_conn, st.session_state.user_id)
-                if buyer_orders:
-                    df_orders = pd.DataFrame(buyer_orders)
-                    # Format currency and dates for display
-                    df_orders['total_amount_cents'] = df_orders['total_amount_cents'].apply(lambda x: f"₹{x / 100:.2f}")
-                    df_orders['order_date'] = pd.to_datetime(df_orders['order_date']).dt.strftime('%Y-%m-%d %H:%M:%S')
-                    df_orders['payment_timestamp'] = pd.to_datetime(df_orders['payment_timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
-                    st.dataframe(df_orders)
+                if not orders_conn: raise Exception("DB connection failed for orders display")
+                
+                buyer_orders_data = get_buyer_orders(orders_conn, st.session_state.user_id)
+                if buyer_orders_data:
+                    df_orders = pd.DataFrame(buyer_orders_data)
+                    df_orders['total_amount_dollars'] = df_orders['total_amount_cents'] / 100
+                    st.dataframe(df_orders[['id', 'order_date', 'total_amount_dollars', 'status']], use_container_width=True)
                 else:
-                    st.info("You have not placed any orders yet.")
-            except Exception as e:
-                 st.error(f"Error fetching orders: {e}")
+                    st.info("You have no orders yet.")
+            except Exception as e_orders_display:
+                st.error(f"Error displaying orders: {e_orders_display}")
             finally:
                 if orders_conn and orders_conn.is_connected():
                     orders_conn.close()
 
 
-        with tab4:
+        with tab4: # Submit Review Tab
             st.header("Submit Review")
-            review_conn = None
+            review_conn = None # Connection for this tab's initial data load
             try:
                 review_conn = get_db_connection()
-                if not review_conn: raise Exception("DB connection failed")
+                if not review_conn: raise Exception("DB connection failed for review section")
 
                 items_to_review = get_order_products_for_review(review_conn, st.session_state.user_id)
 
                 if not items_to_review:
-                    st.info("No items currently available for review.")
+                    st.info("No items to review at the moment. You can review products after your order is completed.")
                 else:
-                    # Removed order_id from display string as it's not reliably available
+                    # Create a mapping from display string to item details for the selectbox
                     options = {f"{item['product_name']} (Product ID: {item['product_id']}, Transaction: {item['transaction_id']})": item for item in items_to_review}
                     selected_option = st.selectbox("Select Item to Review", options.keys())
 
@@ -1451,6 +1583,34 @@ else:
 
                                         # Log activity
                                         log_activity(review_submit_conn, st.session_state.user_id, 'submit_review', f'Review ID: {review_id}')
+                                        # ANOMALY AND BLACKLIST CHECKS START
+                                        db_conn_anomaly_check = None
+                                        try:
+                                            db_conn_anomaly_check = get_db_connection()
+                                            if db_conn_anomaly_check and st.session_state.get('user_id') and st.session_state.get('role'):
+                                                current_user_id = st.session_state.user_id # Capture before potential deletion
+                                                current_user_role = st.session_state.role # Capture before potential deletion
+                                                run_all_user_anomaly_checks_and_log(db_conn_anomaly_check, current_user_id, current_user_role)
+                                                blacklist_result = check_and_blacklist_user_if_needed(db_conn_anomaly_check, current_user_id)
+                                                if blacklist_result.get('blacklisted'):
+                                                    st.error("YOU ARE BLACKLISTED FOR ATTEMPTING TO FRAUD!")
+                                                    # Clear session state for logout, preserving blacklist message flag
+                                                    keys_to_del_on_blacklist_action = [k for k in st.session_state.keys() if k not in ['show_blacklisted_message_duration']]
+                                                    for k_del in keys_to_del_on_blacklist_action:
+                                                        del st.session_state[k_del]
+                                                    st.session_state.logged_in = False
+                                                    st.session_state.user_id = None # Explicitly clear
+                                                    st.session_state.role = None # Explicitly clear
+                                                    st.session_state.show_blacklisted_message_duration = 5
+                                                    st.rerun()
+                                        except mysql.connector.Error as e_anomaly:
+                                            st.warning(f"Database error during post-action anomaly/blacklist check: {e_anomaly}")
+                                        except Exception as e_generic_anomaly:
+                                            st.warning(f"Unexpected error during post-action anomaly/blacklist check: {e_generic_anomaly}")
+                                        finally:
+                                            if db_conn_anomaly_check and db_conn_anomaly_check.is_connected():
+                                                db_conn_anomaly_check.close()
+                                        # ANOMALY AND BLACKLIST CHECKS END
 
                                         # Clear cache to update review lists
                                         st.cache_data.clear()
@@ -1486,7 +1646,7 @@ else:
                      review_conn.close()
 
 
-        with tab5:
+        with tab5: # Customer Support Tab
             st.header("Customer Support")
             support_conn = None
             try:
@@ -1536,6 +1696,34 @@ else:
 
                                 # Log activity
                                 log_activity(support_submit_conn, st.session_state.user_id, 'submit_support_ticket', f'Ticket ID: {ticket_id}')
+                                # ANOMALY AND BLACKLIST CHECKS START
+                                db_conn_anomaly_check = None
+                                try:
+                                    db_conn_anomaly_check = get_db_connection()
+                                    if db_conn_anomaly_check and st.session_state.get('user_id') and st.session_state.get('role'):
+                                        current_user_id = st.session_state.user_id # Capture before potential deletion
+                                        current_user_role = st.session_state.role # Capture before potential deletion
+                                        run_all_user_anomaly_checks_and_log(db_conn_anomaly_check, current_user_id, current_user_role)
+                                        blacklist_result = check_and_blacklist_user_if_needed(db_conn_anomaly_check, current_user_id)
+                                        if blacklist_result.get('blacklisted'):
+                                            st.error("YOU ARE BLACKLISTED FOR ATTEMPTING TO FRAUD!")
+                                            # Clear session state for logout, preserving blacklist message flag
+                                            keys_to_del_on_blacklist_action = [k for k in st.session_state.keys() if k not in ['show_blacklisted_message_duration']]
+                                            for k_del in keys_to_del_on_blacklist_action:
+                                                del st.session_state[k_del]
+                                            st.session_state.logged_in = False
+                                            st.session_state.user_id = None # Explicitly clear
+                                            st.session_state.role = None # Explicitly clear
+                                            st.session_state.show_blacklisted_message_duration = 5
+                                            st.rerun()
+                                except mysql.connector.Error as e_anomaly:
+                                    st.warning(f"Database error during post-action anomaly/blacklist check: {e_anomaly}")
+                                except Exception as e_generic_anomaly:
+                                    st.warning(f"Unexpected error during post-action anomaly/blacklist check: {e_generic_anomaly}")
+                                finally:
+                                    if db_conn_anomaly_check and db_conn_anomaly_check.is_connected():
+                                        db_conn_anomaly_check.close()
+                                # ANOMALY AND BLACKLIST CHECKS END
 
                                 # Run fraud checks
                                 run_fraud_checks(support_submit_conn, 'new_support_ticket', {
@@ -1562,27 +1750,12 @@ else:
                  # Close the initial connection for this tab if it's still open
                  if support_conn and support_conn.is_connected():
                      support_conn.close()
+        
+        # Close the main connection for the buyer dashboard if it's still open
+        if conn and conn.is_connected():
+            conn.close()
 
-        # Ensure the main connection for the buyer dashboard is closed if open
-        # This is tricky because helper functions might use it.
-        # A better approach might be to open/close connections within each tab/action
-        # or use a context manager if Streamlit supported it well across reruns.
-        # For now, relying on connections being closed within specific actions/tabs.
-        # The initial 'conn' might remain open if no tab explicitly closes it.
-        # Let's try closing it here, but this might cause issues if cached functions rely on it.
-        # A safer bet is ensuring each tab/action manages its own connection lifecycle.
-        # Commenting out the close here as it might break cached functions.
-        # if conn and conn.is_connected():
-        #     conn.close()
-
-    else:
-        st.error("Unknown role assigned. Please contact support.")
-
-# Example usage of the DB connection (can be removed later)
-# conn = get_db_connection()
-# if conn:
-#     st.success("Successfully connected to the database (cached).")
-#     # Remember to close the connection when done if not managed by Streamlit's caching context
-#     # conn.close() # Be careful with closing cached resources prematurely
-# else:
-#     st.warning("Could not establish database connection.")
+    else: # Should not happen if logged_in is True and role is set
+        st.error("Invalid user role detected. Please logout and login again.")
+        if conn and conn.is_connected(): # Close general connection if open
+            conn.close()
